@@ -132,6 +132,36 @@ failed install and is not one.
 So the two halves have to ship together. If you implement this scheme for
 another vendor, restore the order on eject as well.
 
+#### Prefer the static configuration to this option
+
+MEASURED, and the reason this section exists: on the hardware this was built
+for, two BMC settings do the whole job and this option is not needed.
+
+    pin the virtual optical device FIRST in the boot order, once
+    set the BMC to AutoAttach
+
+With no media attached the device is not presented at all, so it vanishes from
+the boot order and the disk boots. With media attached it reappears at the top
+and the machine boots the media. Nothing has to be reordered at run time.
+
+Configured that way, with this option OFF, a full deploy ran clean:
+inspection completed, the image was written, the node reached `active`, and the
+machine booted its new image 45 seconds later.
+
+With the option ON, the same machine stalled. The restore half puts the disk
+back on top at the end of every deploy, so the NEXT deploy powers on with the
+disk first, boots the old image instead of the agent, and the node sits in
+`wait call-back` until it times out. That is a worse failure than the one the
+option solves, because the machine looks healthy while the record of it is wrong.
+
+There is also a reason to distrust the mechanism itself: on the same machine,
+seconds apart, the Redfish `BootSources` view and the vendor CLI DISAGREED about
+the current order. This code reads the Redfish view, so it can be deciding on a
+stale picture of the thing it is changing.
+
+So: try the static configuration first. Reach for this option only on a BMC
+where that is not possible, and expect the cost described below.
+
 #### The first attempt after a reorder still boots the old order
 
 A vendor BIOS configuration job applies during the next POST, but **that same
