@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ironic-vmedia-relaxed"
+version = "0.1.0"
+description = "Ironic Redfish virtual-media boot interface without the vendor firmware gate"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: System Administrators",
+]
+
+[project.urls]
+Homepage = "https://github.com/runos-testing/ironic-vmedia-relaxed"
+
+# Ironic discovers hardware interfaces through setuptools entry points. This is
+# the supported out-of-tree extension mechanism: no Ironic source is modified.
+[project.entry-points."ironic.hardware.interfaces.boot"]
+redfish-virtual-media-relaxed = "ironic_vmedia_relaxed.boot:RelaxedRedfishVirtualMediaBoot"
+
+[tool.setuptools.packages.find]
+where = ["src"]
