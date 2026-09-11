@@ -181,12 +181,20 @@ def ensure_vmedia_first(task, v_media):
     attached the entry does not exist, and a request naming it succeeds and
     silently changes nothing.
 
-    :returns: True if the order was already correct or was changed, False if
-        this BMC does not expose the scheme or the entry was not present.
+    Paired with `restore_disk_first`, which puts it back on eject. Leaving it
+    pinned first permanently makes the machine stop on an empty optical device
+    on every later boot.
     """
     if not CONF.redfish.enable_oem_boot_order:
         return False
+    return _reorder_boot(task, v_media, optical_first=True)
 
+
+def _reorder_boot(task, v_media, optical_first):
+    """Move the virtual optical device to the top or the bottom of the sequence.
+
+    :returns: True if the order was already right or was changed.
+    """
     system_id = (task.node.driver_info or {}).get('redfish_system_id')
     if not system_id:
         return False
@@ -196,7 +204,6 @@ def ensure_vmedia_first(task, v_media):
     try:
         sources = conn.get(base + '/BootSources').json()
     except sushy.exceptions.SushyError:
-        # Not a BMC that exposes this. Nothing to do and nothing to warn about.
         return False
 
     seq = (sources.get('Attributes') or {}).get('UefiBootSeq')
@@ -211,21 +218,19 @@ def ensure_vmedia_first(task, v_media):
             break
 
     if target is None:
-        # Do NOT report success here. The entry is absent, which usually means
-        # the media is not attached yet, and a request naming a missing entry
-        # returns 200 while doing nothing.
-        LOG.warning('No virtual optical entry in the UEFI boot sequence for '
-                    'node %s, so the boot order was left alone. The machine '
-                    'may boot its internal disk instead of the attached '
-                    'media.', task.node.uuid)
+        if optical_first:
+            LOG.warning(
+                'No virtual optical entry in the UEFI boot sequence for node %s, so the '
+                'boot order was left alone. The machine may boot its internal disk '
+                'instead of the attached media.', task.node.uuid)
         return False
 
-    if target.get('Index') == 0:
-        LOG.debug('Virtual optical device is already first in the UEFI boot '
-                  'sequence for node %s.', task.node.uuid)
+    rest = [e for e in seq if e is not target]
+    ordered = [target] + rest if optical_first else rest + [target]
+
+    if [e.get('Name') for e in ordered] == [e.get('Name') for e in seq]:
         return True
 
-    ordered = [target] + [e for e in seq if e is not target]
     payload = {'Attributes': {'UefiBootSeq': [
         {'Index': i,
          'Enabled': e.get('Enabled', True),
@@ -236,30 +241,49 @@ def ensure_vmedia_first(task, v_media):
     try:
         conn.patch(base + '/BootSources/Settings', data=payload)
     except sushy.exceptions.SushyError as exc:
-        LOG.warning('Could not reorder the UEFI boot sequence for node '
-                    '%(node)s: %(exc)s',
+        LOG.warning('Could not reorder the UEFI boot sequence for node %(node)s: %(exc)s',
                     {'node': task.node.uuid, 'exc': exc})
         return False
 
-    # The change is pending until a configuration job applies it on the next
-    # boot, which is the boot Ironic is about to perform anyway.
     jobs_uri = _managers_jobs_uri(conn)
     if jobs_uri:
         try:
             conn.post(jobs_uri,
                       data={'TargetSettingsURI': base + '/BootSources/Settings'})
         except sushy.exceptions.SushyError as exc:
-            LOG.warning('Reordered the UEFI boot sequence for node %(node)s '
-                        'but could not schedule the configuration job, so it '
-                        'may not take effect: %(exc)s',
+            LOG.warning('Reordered the UEFI boot sequence for node %(node)s but could not '
+                        'schedule the configuration job, so it may not take effect: %(exc)s',
                         {'node': task.node.uuid, 'exc': exc})
             return False
 
-    LOG.info('Moved the virtual optical device to the top of the UEFI boot '
-             'sequence for node %s. An OS installation pushes the internal '
-             'disk back to the top, so this is re-asserted on every attach.',
-             task.node.uuid)
+    LOG.info('Moved the virtual optical device %(where)s the UEFI boot sequence for node '
+             '%(node)s.',
+             {'where': 'to the top of' if optical_first else 'to the bottom of',
+              'node': task.node.uuid})
     return True
+
+
+def restore_disk_first(task, v_media):
+    """Put the virtual optical device BACK at the bottom after ejecting media.
+
+    THIS IS NOT OPTIONAL TIDYING, it is the other half of the fix.
+
+    A BMC that only lists the virtual optical device while it is permanently
+    attached needs that setting to make the reorder possible at all. But a
+    permanently attached device plus a boot order with it FIRST means the
+    firmware is offered an EMPTY optical device on every subsequent boot, and
+    some stop there rather than falling through to the disk. The machine then
+    deploys perfectly and never boots again, which looks like a failed install
+    and is not one.
+
+    Observed directly on a machine that booted its freshly written image, then
+    stopped booting once the optical device was pinned first permanently.
+
+    So the top position is held only for as long as the media is attached.
+    """
+    if not CONF.redfish.enable_oem_boot_order:
+        return False
+    return _reorder_boot(task, v_media, optical_first=False)
 
 
 def eject(task, v_media):

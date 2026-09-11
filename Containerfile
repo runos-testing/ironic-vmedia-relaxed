@@ -69,6 +69,7 @@ assert 'relaxed_oem' in inspect.getsource(boot.RedfishVirtualMediaBoot._validate
 assert inspect.getsource(boot._insert_vmedia_in_resource).count('relaxed_oem.insert') == 2, 'insert needs BOTH the MissingAction and BadRequest hooks'; \
 assert 'relaxed_oem.eject' in inspect.getsource(boot._eject_vmedia_from_resource), 'eject not hooked'; \
 assert 'relaxed_oem.ensure_vmedia_first' in inspect.getsource(boot._insert_vmedia_in_resource), 'boot order not hooked on the standard insert path'; \
+assert 'relaxed_oem.restore_disk_first' in inspect.getsource(boot._eject_vmedia_from_resource), 'boot order not restored on eject'; \
 assert hasattr(VM, 'path') and hasattr(VM, 'json'), 'sushy VirtualMedia lost path/json'; \
 assert '_conn' in inspect.getsource(__import__('sushy.resources.base', fromlist=['x']).ResourceBase.__init__), 'sushy renamed the private connector attribute this module uses'; \
 print('OK: options registered, all three hooks in place, sushy API as expected')"

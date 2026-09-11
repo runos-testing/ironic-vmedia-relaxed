@@ -436,6 +436,37 @@ class BootOrder(unittest.TestCase):
         self.assertFalse(relaxed_oem.ensure_vmedia_first(self.task, vm),
                          'a reorder that cannot be applied is not a success')
 
+    def test_restores_the_disk_when_media_is_ejected(self):
+        # THE OTHER HALF OF THE FIX, and the reason it exists: a BMC that only
+        # lists the optical device while it is permanently attached needs that
+        # setting for the reorder to work at all, but a permanently attached
+        # device pinned FIRST means the firmware is offered an empty optical
+        # device on every later boot. Observed on real hardware: the machine
+        # booted its freshly written image, then stopped booting once the
+        # optical device was left pinned first.
+        vm, conn = self._vm(self.CD_FIRST)
+        self.assertTrue(relaxed_oem.restore_disk_first(self.task, vm))
+        _, body = conn.patches[0]
+        order = [e['Name'] for e in body['Attributes']['UefiBootSeq']]
+        self.assertEqual('Optical.iDRACVirtual.1-1', order[-1])
+        self.assertCountEqual(self.CD_FIRST, order)
+
+    def test_restore_is_a_no_op_when_the_disk_is_already_first(self):
+        vm, conn = self._vm(self.DISK_FIRST)
+        self.assertTrue(relaxed_oem.restore_disk_first(self.task, vm))
+        self.assertEqual([], conn.patches)
+
+    def test_restore_respects_the_option(self):
+        CONF.set_override('enable_oem_boot_order', False, group='redfish')
+        vm, conn = self._vm(self.CD_FIRST)
+        self.assertFalse(relaxed_oem.restore_disk_first(self.task, vm))
+        self.assertEqual([], conn.patches)
+
+    def test_eject_path_restores_the_order(self):
+        import inspect
+        self.assertIn('relaxed_oem.restore_disk_first',
+                      inspect.getsource(rb._eject_vmedia_from_resource))
+
     def test_standard_insert_path_also_fixes_the_order(self):
         # The Dell uses the STANDARD insert, so the hook must be on that path
         # too, not only on the OEM one.

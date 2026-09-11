@@ -83,6 +83,11 @@ covered by tests:
   and refuses to report success when the entry is not there, rather than
   silently leaving a machine that boots its own disk.
 
+The top of the boot order is held ONLY while the media is attached: the eject
+path puts the virtual optical device back at the bottom. That pairing is not
+tidiness, it is the other half of the fix, and skipping it produces a machine
+that deploys perfectly and then never boots again. See the prerequisite below.
+
 Currently implements the Dell `BootSources` scheme, and does nothing on a BMC
 that does not expose it.
 
@@ -112,6 +117,20 @@ This is deliberately not done by the driver: it is a persistent BMC setting
 rather than per-deployment state, it is vendor-CLI only on this generation, and
 silently changing a BMC's configuration is not something a boot interface
 should do behind an operator's back.
+
+**And it is why the eject path puts the device back at the bottom.** Permanently
+attaching the device is what makes the entry exist to reorder, but it also means
+the firmware is offered that device on every boot forever. Leave it pinned first
+and the machine is offered an EMPTY optical device ahead of its disk on every
+later boot, and some firmware stops there rather than falling through.
+
+Observed on real hardware: a machine booted its freshly written image perfectly,
+then stopped booting entirely once the optical device was left pinned first. It
+deploys, reports success, and never comes back, which looks exactly like a
+failed install and is not one.
+
+So the two halves have to ship together. If you implement this scheme for
+another vendor, restore the order on eject as well.
 
 #### The first attempt after a reorder still boots the old order
 

@@ -38,7 +38,7 @@
          LOG.info("Inserted boot media %(boot_url)s into "
                   "%(boot_device)s for node "
                   "%(node)s", {'node': task.node.uuid,
-@@ -564,7 +574,12 @@
+@@ -564,7 +574,16 @@
                  continue
          inserted = v_media.inserted
          if inserted:
@@ -49,10 +49,14 @@
 +                    sushy.exceptions.BadRequestError):
 +                if not relaxed_oem.eject(task, v_media):
 +                    raise
++            # The top of the boot order was borrowed for as long as the media
++            # was attached. Give it back, or the machine is offered an empty
++            # optical device first on every later boot and some stop there.
++            relaxed_oem.restore_disk_first(task, v_media)
              found = True
  
          LOG.info("Boot media is%(already)s ejected from "
-@@ -912,6 +927,12 @@
+@@ -912,6 +931,12 @@
              with node.
          :raises: InvalidParameterValue if vendor not supported
          """
