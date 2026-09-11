@@ -25,13 +25,29 @@ the window and nonetheless work.
 
 ## What this provides
 
-One additional boot interface, `redfish-virtual-media-relaxed`, which subclasses
-the stock one and overrides exactly one method: `_validate_vendor` becomes a
-no-op. Boot ISO generation, media insertion and ejection, boot device selection
-and cleanup are all inherited unmodified.
+Two things, both registered through setuptools entry points, which is Ironic's
+supported out-of-tree extension mechanism. No Ironic source is patched.
 
-No Ironic source is patched. Registration is via setuptools entry points, which
-is Ironic's supported out-of-tree extension mechanism.
+**A boot interface, `redfish-virtual-media-relaxed`.** It subclasses the stock
+one and overrides exactly one method: `_validate_vendor` becomes a no-op. Boot
+ISO generation, media insertion and ejection, boot device selection and cleanup
+are all inherited unmodified.
+
+**A hardware type, `redfish-relaxed`.** This is required, not optional. Enabling
+a boot interface is only half of what Ironic needs: each hardware type publishes
+a fixed list of interface classes it accepts, and the stock `redfish` type names
+only the stock classes. Without the hardware type, a node rejects the interface
+even though the conductor has loaded it:
+
+```
+boot interface implementation '<RelaxedRedfishVirtualMediaBoot object>'
+is not supported by hardware type RedfishHardware.
+```
+
+`redfish-relaxed` subclasses `RedfishHardware` and appends the relaxed interface
+to the supported list, changing nothing else. It is appended last, so the
+default interface on a `redfish-relaxed` node is the same as on a `redfish`
+node. Choosing the relaxed interface stays an explicit act.
 
 ## Verify before you use it
 
@@ -77,14 +93,37 @@ Install the package into an Ironic image, or use the published one:
 ghcr.io/runos-testing/ironic-vmedia-relaxed:latest
 ```
 
-Then add the interface to `enabled_boot_interfaces` in `ironic.conf`:
+Then enable **both** the hardware type and the boot interface. Enabling only
+one of them does nothing useful:
 
 ```ini
+enabled_hardware_types  = redfish,redfish-relaxed
 enabled_boot_interfaces = redfish-virtual-media,redfish-virtual-media-relaxed,ipxe,pxe
 ```
 
-Under Metal3, set it through the `Ironic` custom resource's `extraConfig`, and
-select it per node with `driver_info` / the `BareMetalHost` spec.
+Note that `ironic.conf` is not the only place these can come from. The Metal3
+Ironic image also honours oslo.config's environment variables, so a deployment
+may set `OS_DEFAULT__ENABLED_BOOT_INTERFACES` instead, and the rendered
+`ironic.conf` will still show the stock list. Check the running service, not the
+file:
+
+```bash
+# The conductor log lists what it actually loaded
+... INFO ironic.common.driver_factory Loaded the following boot interfaces: [...]
+```
+
+Then select them per node:
+
+```bash
+openstack baremetal node set <node> \
+  --driver redfish-relaxed \
+  --boot-interface redfish-virtual-media-relaxed
+```
+
+Under Metal3, set the config through the `Ironic` custom resource's
+`extraConfig`. Note that the Bare Metal Operator chooses a node's driver and
+boot interface from the `BareMetalHost` BMC address scheme, so confirm which
+values it sets before assuming a `BareMetalHost` will pick these up.
 
 ## Compatibility
 
