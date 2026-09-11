@@ -126,6 +126,39 @@ Together these mean upstream Ironic cannot support an out-of-tree virtual-media
 hardware type at all. Patching one method is the smaller and more honest change,
 and it has the practical advantage of leaving nodes on the stock driver.
 
+## Keeping up with upstream
+
+The layout is chosen to make rebasing onto a new Ironic release cheap, because
+a patch against a moving target is a maintenance liability.
+
+All the logic lives in `module/ironic_relaxed_oem.py`, which is **copied** into
+the image, never patched. It also registers its own config options, so
+`ironic/conf/redfish.py` is not touched at all. The patch in `patches/` adds
+only call sites: an import, the vendor gate, two insert hooks and one eject
+hook. That is under 60 lines against a single file.
+
+To move to a new Ironic release, bump `IRONIC_IMAGE` and build. Then:
+
+- if the patch still applies, the build succeeds and the assertions confirm the
+  hooks are live;
+- if upstream moved the code, `patch` fails and the **build fails**. It cannot
+  quietly produce an unpatched image.
+
+The build also asserts things a successful patch does not guarantee:
+
+- both options are registered and still default to `false`;
+- all three hooks are present, including that the insert path has **two**
+  (missing-action and bad-request), since fixing only one is a mistake already
+  made once here;
+- sushy still exposes the `path` and `json` attributes, and still names its
+  connector `_conn`. That last one is private API, so it is checked at build
+  time rather than discovered during a deploy.
+
+The hooked insert loop is upstream's busiest spot in this file: it already
+carries special cases for several vendors and will keep changing. Expect to
+re-seat those two hooks occasionally. The vendor gate and the eject hook are in
+much quieter code.
+
 ## Verify before you enable it
 
 This option does not make an incapable BMC capable. It converts a clear early
