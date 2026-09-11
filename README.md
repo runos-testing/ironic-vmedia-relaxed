@@ -54,6 +54,34 @@ to honour the standard `Boot` override either.
 **This fallback is reached only when the standard action is missing**, so it
 cannot change behaviour on a BMC that implements it.
 
+Two details here are not what you would guess from reading the code, and both
+cost real time to find:
+
+**The BMC does not land in `MissingActionError`.** That is the obvious place to
+hook a fallback, and it is wrong. When the standard action is absent sushy does
+not give up: it falls back to `PATCH`ing the VirtualMedia resource directly. An
+iLO 4 rejects that PATCH:
+
+```
+HTTP PATCH .../redfish/v1/Managers/1/VirtualMedia/2 returned code 400
+Base.0.10.PropertyUnknown: ['Inserted']
+```
+
+which surfaces as `BadRequestError`. So the fallback has to hang off the
+`BadRequestError` handler as well, and the eject path needs the same pair.
+
+**The OEM action takes `Image` and nothing else.** Passing an `Oem` block in the
+POST body is rejected:
+
+```
+Base.0.10.ActionParameterUnknown: ['InsertVirtualMedia', 'Oem']
+```
+
+`BootOnNextServerReset` is a *property* of the device, not a parameter of the
+action, so it needs a separate `PATCH` after the insert. That PATCH is best
+effort: the media is already attached by then, so failing it warrants a warning
+but must not undo a successful insert.
+
 Nodes keep the stock `redfish` driver and the stock `redfish-virtual-media`
 boot interface in both cases, so anything that drives Ironic keeps working
 unchanged, the Bare Metal Operator included.
