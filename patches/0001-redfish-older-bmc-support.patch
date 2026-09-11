@@ -51,8 +51,8 @@
 +# These helpers are reached ONLY when the standard action is absent, so they
 +# cannot change behaviour on a BMC that implements it.
 +_OEM_VENDORS = ('Hp', 'Hpe')
-+
-+
+ 
+ 
 +def _oem_vmedia_action(v_media, verb):
 +    """Find a vendor OEM virtual media action on a device.
 +
@@ -68,8 +68,8 @@
 +        if target:
 +            return vendor, target
 +    return None, None
- 
- 
++
++
 +def _oem_insert_vmedia(task, v_media, boot_url):
 +    """Insert virtual media using a vendor OEM action.
 +
@@ -139,7 +139,7 @@
  @tenacity.retry(retry=tenacity.retry_if_exception(_test_retry),
                  stop=tenacity.stop_after_attempt(3),
                  wait=tenacity.wait_fixed(3),
-@@ -424,10 +518,14 @@
+@@ -424,16 +518,31 @@
          # via WebSocket/NBD and do not have the InsertMedia action.
          # Catch MissingActionError and try the next available device.
          except sushy.exceptions.MissingActionError:
@@ -158,7 +158,24 @@
          # NOTE(janders): On Cisco UCSB and UCSX blades there are several
          # vMedia devices. Some of those are only meant for internal use
          # by CIMC vKVM - attempts to InsertMedia into those will result
-@@ -564,7 +662,14 @@
+         # in BadRequestError. We catch the exception here so that we don't
+         # fail out and try the next available device instead, if available.
+         except sushy.exceptions.BadRequestError as exc:
++            # NOTE(relaxed): when a BMC advertises no InsertMedia action,
++            # sushy falls back to PATCHing the VirtualMedia resource. HPE
++            # iLO 4 rejects that PATCH with HTTP 400, so this handler, not
++            # MissingActionError, is where an iLO 4 actually lands. Try the
++            # vendor OEM action before writing the device off.
++            if _oem_insert_vmedia(task, v_media, boot_url):
++                LOG.info("Inserted boot media %(boot_url)s into "
++                         "%(boot_device)s for node %(node)s",
++                         {'node': task.node.uuid, 'boot_url': boot_url,
++                          'boot_device': boot_device})
++                return True
+             err_msg = ("Inserting virtual media into %(boot_device)s "
+                        "failed for node %(node)s, moving to next virtual "
+                        "media device, if available. %(exc)s" %
+@@ -564,7 +673,15 @@
                  continue
          inserted = v_media.inserted
          if inserted:
@@ -168,13 +185,14 @@
 +            # either, and failing to eject leaves media attached.
 +            try:
 +                v_media.eject_media()
-+            except sushy.exceptions.MissingActionError:
++            except (sushy.exceptions.MissingActionError,
++                    sushy.exceptions.BadRequestError):
 +                if not _oem_eject_vmedia(task, v_media):
 +                    raise
              found = True
  
          LOG.info("Boot media is%(already)s ejected from "
-@@ -912,6 +1017,14 @@
+@@ -912,6 +1029,14 @@
              with node.
          :raises: InvalidParameterValue if vendor not supported
          """
