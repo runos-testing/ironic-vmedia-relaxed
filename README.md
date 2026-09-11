@@ -144,6 +144,39 @@ To move to a new Ironic release, bump `IRONIC_IMAGE` and build. Then:
 - if upstream moved the code, `patch` fails and the **build fails**. It cannot
   quietly produce an unpatched image.
 
+### Tests
+
+`tests/` runs **inside the built image**, against the real Ironic and sushy in
+it, as a build step. An upstream change that breaks what this project depends
+on therefore fails the build rather than a deployment, and the tests are removed
+in the same layer so they are not carried in the published image.
+
+Run them by hand against an image with:
+
+```bash
+docker run --rm -v "$PWD/tests:/tmp/tests:ro" -w /tmp/tests \
+  --entrypoint python3.12 <image> -m unittest discover -s . -t .
+```
+
+They cover the use cases this exists for, and are deliberately shaped around
+the mistakes actually made while writing it, because those are the ones that
+will be made again:
+
+- the vendor gate still raises exactly as upstream does while the option is off;
+- the OEM insert body carries `Image` **and nothing else**, asserted on the
+  recorded request, because an `Oem` block there is rejected by the BMC;
+- `BootOnNextServerReset` goes out as a **separate PATCH**, and a failure of
+  that PATCH does not undo an insert that already succeeded;
+- the fallback is reached from **both** the missing-action and the bad-request
+  paths, since an iLO 4 lands in the second one and hooking only the first was
+  the original bug;
+- a device carrying the standard action never reaches the OEM path at all;
+- both options default to false and send nothing while off.
+
+`tests/fixtures/ilo4_virtualmedia.json` is a real, unmodified payload captured
+from an HPE iLO 4, so the lookup is tested against what the hardware actually
+sends rather than against an idea of it.
+
 The build also asserts things a successful patch does not guarantee:
 
 - both options are registered and still default to `false`;

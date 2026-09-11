@@ -1,0 +1,336 @@
+# Copyright 2026 the ironic-vmedia-relaxed authors
+# Licensed under the Apache License, Version 2.0
+"""Tests for the older-BMC support, run INSIDE the built image.
+
+These run against the real Ironic and sushy in the image, not against mocks of
+them, so they fail when an Ironic or sushy update breaks the specific things
+this project depends on.
+
+They are deliberately written around the mistakes that were actually made here,
+because those are the ones that will be made again:
+
+* hooking only the MissingActionError path, when an iLO 4 lands in
+  BadRequestError;
+* putting an Oem block in the InsertVirtualMedia body, which the BMC rejects;
+* forgetting that BootOnNextServerReset is a separate PATCH.
+
+Stdlib unittest only, so the image needs no test dependency installed.
+"""
+
+import json
+import os
+import types
+import unittest
+
+import sushy
+from sushy import exceptions as sushy_exc
+
+from ironic.common import exception
+from ironic.conf import CONF
+from ironic.drivers.modules.redfish import boot as rb
+from ironic.drivers.modules.redfish import relaxed_oem
+
+FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
+
+
+def load(name):
+    with open(os.path.join(FIXTURES, name)) as fh:
+        return json.load(fh)
+
+
+class FakeConn(object):
+    """Records what would have been sent to the BMC."""
+
+    def __init__(self, post_exc=None, patch_exc=None):
+        self.posts = []
+        self.patches = []
+        self._post_exc = post_exc
+        self._patch_exc = patch_exc
+
+    def post(self, path, data=None):
+        self.posts.append((path, data))
+        if self._post_exc:
+            raise self._post_exc
+
+    def patch(self, path, data=None):
+        self.patches.append((path, data))
+        if self._patch_exc:
+            raise self._patch_exc
+
+
+def fake_vmedia(payload, conn=None, media_types=None, inserted=False,
+                insert_exc=None, eject_exc=None):
+    """A stand-in for a sushy VirtualMedia resource."""
+    vm = types.SimpleNamespace()
+    vm.json = payload
+    vm.path = payload.get('@odata.id', '/redfish/v1/Managers/1/VirtualMedia/2')
+    vm.identity = payload.get('Id', '2')
+    vm.name = payload.get('Name', 'VirtualMedia')
+    vm.media_types = media_types or [sushy.VIRTUAL_MEDIA_CD]
+    vm.inserted = inserted
+    vm._conn = conn or FakeConn()
+
+    def insert_media(*a, **kw):
+        if insert_exc:
+            raise insert_exc
+    def eject_media(*a, **kw):
+        if eject_exc:
+            raise eject_exc
+
+    vm.insert_media = insert_media
+    vm.eject_media = eject_media
+    return vm
+
+
+def fake_resource(members):
+    res = types.SimpleNamespace()
+    res.virtual_media = types.SimpleNamespace(get_members=lambda: members)
+    return res
+
+
+def fake_task():
+    node = types.SimpleNamespace(
+        uuid='00000000-0000-0000-0000-000000000000',
+        driver='redfish',
+        driver_info={},
+        instance_info={},
+        properties={'vendor': 'Dell Inc.'})
+    node.get_interface = lambda kind: 'redfish-virtual-media'
+    # The insert path calls task.driver.boot, so give it the real interface
+    # rather than a stub: that keeps these tests honest about upstream code.
+    driver = types.SimpleNamespace(boot=rb.RedfishVirtualMediaBoot())
+    return types.SimpleNamespace(node=node, driver=driver)
+
+
+def bad_request(msg='rejected'):
+    return sushy_exc.BadRequestError('PATCH', '/x', types.SimpleNamespace(
+        status_code=400, json=lambda: {}, content=b'', text=msg))
+
+
+class OptionDefaults(unittest.TestCase):
+    """The image must be inert until a deployment opts in."""
+
+    def test_both_options_default_false(self):
+        self.assertFalse(CONF.redfish.skip_vendor_validation)
+        self.assertFalse(CONF.redfish.enable_oem_vmedia_fallback)
+
+
+class VendorGate(unittest.TestCase):
+
+    def setUp(self):
+        self.task = fake_task()
+        self.iface = rb.RedfishVirtualMediaBoot()
+        self.mgr = types.SimpleNamespace(
+            manager_type=sushy.MANAGER_TYPE_BMC,
+            firmware_version='2.65.65.65')
+        CONF.set_override('skip_vendor_validation', False, group='redfish')
+
+    def test_stock_behaviour_preserved_when_disabled(self):
+        # The whole point of the default: an unsupported Dell must still be
+        # refused exactly as upstream refuses it.
+        self.assertRaises(exception.InvalidParameterValue,
+                          self.iface._validate_vendor,
+                          self.task, [self.mgr])
+
+    def test_gate_skipped_when_enabled(self):
+        CONF.set_override('skip_vendor_validation', True, group='redfish')
+        self.assertIsNone(self.iface._validate_vendor(self.task, [self.mgr]))
+
+    def test_supported_firmware_still_passes_when_disabled(self):
+        self.mgr.firmware_version = '6.10.00.00'
+        self.assertIsNone(self.iface._validate_vendor(self.task, [self.mgr]))
+
+    def test_upstream_signature_unchanged(self):
+        # A signature change upstream would break the hook silently.
+        import inspect
+        sig = inspect.signature(rb.RedfishVirtualMediaBoot._validate_vendor)
+        self.assertEqual(['self', 'task', 'managers'], list(sig.parameters))
+
+
+class OemLookup(unittest.TestCase):
+
+    def setUp(self):
+        self.ilo4 = load('ilo4_virtualmedia.json')
+
+    def test_real_ilo4_payload_has_no_standard_action(self):
+        # If this ever stops being true the fallback is not needed for it.
+        self.assertFalse(self.ilo4.get('Actions'))
+
+    def test_finds_insert_and_eject_on_real_payload(self):
+        vm = fake_vmedia(self.ilo4)
+        vendor, target = relaxed_oem._oem_action(vm, 'Insert')
+        self.assertEqual('Hp', vendor)
+        self.assertIn('InsertVirtualMedia', target)
+        vendor, target = relaxed_oem._oem_action(vm, 'Eject')
+        self.assertEqual('Hp', vendor)
+        self.assertIn('EjectVirtualMedia', target)
+
+    def test_ignores_a_device_with_the_standard_action(self):
+        vm = fake_vmedia({'Actions': {'#VirtualMedia.InsertMedia': {}}})
+        self.assertEqual((None, None), relaxed_oem._oem_action(vm, 'Insert'))
+
+    def test_handles_ilo5_spelling(self):
+        payload = {'Oem': {'Hpe': {'Actions': {
+            '#HpeiLOVirtualMedia.InsertVirtualMedia': {'target': '/t'}}}}}
+        self.assertEqual(('Hpe', '/t'),
+                         relaxed_oem._oem_action(fake_vmedia(payload), 'Insert'))
+
+
+class OemInsertPayload(unittest.TestCase):
+    """The exact wire format. This is where the real bug was."""
+
+    def setUp(self):
+        CONF.set_override('enable_oem_vmedia_fallback', True, group='redfish')
+        self.task = fake_task()
+        self.conn = FakeConn()
+        self.vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=self.conn)
+
+    def tearDown(self):
+        CONF.set_override('enable_oem_vmedia_fallback', False, group='redfish')
+
+    def test_post_body_carries_image_and_nothing_else(self):
+        # An Oem block here is rejected by the BMC with
+        # Base.0.10.ActionParameterUnknown: ['InsertVirtualMedia', 'Oem'].
+        self.assertTrue(relaxed_oem.insert(self.task, self.vm, 'http://h/b.iso'))
+        self.assertEqual(1, len(self.conn.posts))
+        _, body = self.conn.posts[0]
+        self.assertEqual({'Image': 'http://h/b.iso'}, body)
+
+    def test_boot_on_next_reset_is_a_separate_patch(self):
+        relaxed_oem.insert(self.task, self.vm, 'http://h/b.iso')
+        self.assertEqual(1, len(self.conn.patches))
+        path, body = self.conn.patches[0]
+        self.assertEqual(self.vm.path, path)
+        self.assertIs(True, body['Oem']['Hp']['BootOnNextServerReset'])
+
+    def test_a_failed_patch_does_not_undo_a_good_insert(self):
+        conn = FakeConn(patch_exc=bad_request())
+        vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=conn)
+        self.assertTrue(relaxed_oem.insert(self.task, vm, 'http://h/b.iso'))
+
+    def test_a_failed_post_reports_failure(self):
+        conn = FakeConn(post_exc=bad_request())
+        vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=conn)
+        self.assertFalse(relaxed_oem.insert(self.task, vm, 'http://h/b.iso'))
+
+    def test_disabled_option_sends_nothing(self):
+        CONF.set_override('enable_oem_vmedia_fallback', False, group='redfish')
+        self.assertFalse(relaxed_oem.insert(self.task, self.vm, 'http://h/b.iso'))
+        self.assertEqual([], self.conn.posts)
+
+
+class InsertHookReachedFromBothPaths(unittest.TestCase):
+    """The regression test for the bug that cost the most time.
+
+    An iLO 4 does NOT raise MissingActionError. With no standard action sushy
+    falls back to PATCHing the resource, the BMC rejects that, and it arrives
+    as BadRequestError. Hooking only the first is not enough.
+    """
+
+    def setUp(self):
+        CONF.set_override('enable_oem_vmedia_fallback', True, group='redfish')
+        self.task = fake_task()
+
+    def tearDown(self):
+        CONF.set_override('enable_oem_vmedia_fallback', False, group='redfish')
+
+    def _run(self, exc):
+        conn = FakeConn()
+        vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=conn,
+                         insert_exc=exc)
+        ok = rb._insert_vmedia_in_resource(
+            self.task, fake_resource([vm]), 'http://h/b.iso',
+            sushy.VIRTUAL_MEDIA_CD, [])
+        return ok, conn
+
+    def test_bad_request_falls_back(self):
+        ok, conn = self._run(bad_request())
+        self.assertTrue(ok, 'BadRequestError must reach the OEM fallback')
+        self.assertEqual(1, len(conn.posts))
+
+    def test_missing_action_falls_back(self):
+        ok, conn = self._run(sushy_exc.MissingActionError(
+            action='#VirtualMedia.InsertMedia', resource='/x'))
+        self.assertTrue(ok, 'MissingActionError must reach the OEM fallback')
+        self.assertEqual(1, len(conn.posts))
+
+    def test_standard_device_never_reaches_the_fallback(self):
+        conn = FakeConn()
+        vm = fake_vmedia({'Actions': {'#VirtualMedia.InsertMedia': {}},
+                          'Id': '1'}, conn=conn)
+        ok = rb._insert_vmedia_in_resource(
+            self.task, fake_resource([vm]), 'http://h/b.iso',
+            sushy.VIRTUAL_MEDIA_CD, [])
+        self.assertTrue(ok)
+        self.assertEqual([], conn.posts, 'OEM path used on a standard BMC')
+
+
+class EjectHook(unittest.TestCase):
+
+    def setUp(self):
+        CONF.set_override('enable_oem_vmedia_fallback', True, group='redfish')
+        self.task = fake_task()
+
+    def tearDown(self):
+        CONF.set_override('enable_oem_vmedia_fallback', False, group='redfish')
+
+    def test_bad_request_falls_back_to_oem_eject(self):
+        conn = FakeConn()
+        vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=conn,
+                         inserted=True, eject_exc=bad_request())
+        self.assertTrue(rb._eject_vmedia_from_resource(
+            self.task, fake_resource([vm])))
+        self.assertEqual(1, len(conn.posts))
+        self.assertIn('EjectVirtualMedia', conn.posts[0][0])
+
+    def test_raises_when_no_oem_action_exists(self):
+        conn = FakeConn()
+        vm = fake_vmedia({'Id': '1'}, conn=conn, inserted=True,
+                         eject_exc=bad_request())
+        self.assertRaises(sushy_exc.BadRequestError,
+                          rb._eject_vmedia_from_resource,
+                          self.task, fake_resource([vm]))
+
+
+class UpstreamContract(unittest.TestCase):
+    """Things upstream could change that would break this project.
+
+    These fail loudly on an Ironic or sushy bump rather than at deploy time.
+    """
+
+    def test_ironic_still_exposes_the_hooked_functions(self):
+        self.assertTrue(callable(rb._insert_vmedia_in_resource))
+        self.assertTrue(callable(rb._eject_vmedia_from_resource))
+
+    def test_hooked_insert_signature_unchanged(self):
+        # These tests call it directly, so a new parameter must be noticed
+        # here rather than as three confusing errors.
+        import inspect
+        sig = inspect.signature(rb._insert_vmedia_in_resource)
+        self.assertEqual(
+            ['task', 'resource', 'boot_url', 'boot_device', 'err_msgs',
+             'username', 'password'],
+            list(sig.parameters))
+
+    def test_sushy_virtualmedia_still_exposes_json_and_path(self):
+        from sushy.resources.manager.virtual_media import VirtualMedia
+        self.assertTrue(hasattr(VirtualMedia, 'json'))
+        self.assertTrue(hasattr(VirtualMedia, 'path'))
+
+    def test_sushy_still_names_its_connector_conn(self):
+        # Private API. A rename would otherwise surface as a failed deploy.
+        import inspect
+        from sushy.resources import base
+        self.assertIn('self._conn',
+                      inspect.getsource(base.ResourceBase.__init__))
+
+    def test_both_insert_hooks_are_present_in_source(self):
+        import inspect
+        src = inspect.getsource(rb._insert_vmedia_in_resource)
+        self.assertEqual(2, src.count('relaxed_oem.insert'),
+                         'insert needs BOTH the missing-action and '
+                         'bad-request hooks')
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

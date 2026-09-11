@@ -47,9 +47,16 @@ RUN find "${SITE_PACKAGES}/ironic" -name '__pycache__' -prune -exec rm -rf {} + 
         "${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py" \
         "${SITE_PACKAGES}/ironic/drivers/modules/redfish/relaxed_oem.py"
 
-# Verify the result rather than trusting that the patch applied. A build that
-# produced an inert option, or that will fail at deploy time on a renamed sushy
-# attribute, is worse than no build at all.
+# Run the test suite against the assembled image. These tests exercise the real
+# Ironic and sushy in this image, so an upstream change that breaks what this
+# project depends on fails the BUILD rather than a deployment. The tests are
+# removed in the same layer, so they are not carried in the published image.
+COPY tests/ /tmp/tests/
+RUN cd /tmp/tests && python3.12 -m unittest discover -s . -t . -v \
+ && rm -rf /tmp/tests
+
+# A last belt-and-braces check on the assembled image. The suite above covers
+# behaviour; this covers "did the patch actually land".
 RUN python3.12 -c "\
 import inspect; \
 from ironic.conf import CONF; \
