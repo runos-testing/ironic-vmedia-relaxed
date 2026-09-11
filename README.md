@@ -86,6 +86,43 @@ covered by tests:
 Currently implements the Dell `BootSources` scheme, and does nothing on a BMC
 that does not expose it.
 
+#### Prerequisite: the virtual device must be permanently attached
+
+This option cannot help if the BMC never presents the virtual device to the
+host, because then it is not a boot option to reorder. On Dell, check:
+
+```sh
+racadm get idrac.virtualmedia
+# Attached=AutoAttach   <- the virtual CD is presented only transiently
+```
+
+In that mode the symptoms are quietly misleading:
+
+- Redfish reports `Inserted: True`, so the media looks attached;
+- the UEFI boot sequence contains **no** virtual optical entry at all;
+- a reorder naming that entry returns `200` and changes nothing.
+
+Set it once per machine, and it survives OS installs:
+
+```sh
+racadm set idrac.virtualmedia.Attached Attached
+```
+
+This is deliberately not done by the driver: it is a persistent BMC setting
+rather than per-deployment state, it is vendor-CLI only on this generation, and
+silently changing a BMC's configuration is not something a boot interface
+should do behind an operator's back.
+
+#### The first attempt after a reorder still boots the old order
+
+A vendor BIOS configuration job applies during the next POST, but **that same
+boot still uses the previous order**. The corrected order governs the boot after
+it. So the first deployment following a reorder can still boot the internal
+disk, and the retry succeeds.
+
+Nothing is wrong when that happens, it costs one cycle. Because the order is
+re-asserted on every attach, it self-heals without operator involvement.
+
 Two details here are not what you would guess from reading the code, and both
 cost real time to find:
 
