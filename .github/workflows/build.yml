@@ -22,19 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      # Fail fast on syntax and packaging errors before spending time on a
-      # container build.
-      - name: Validate the package
+      # Fail fast on a malformed patch before spending time on a container
+      # build. The build itself asserts that the patch APPLIED and that the
+      # resulting option is registered, so this is only the cheap first check.
+      - name: Check the patch is well formed
         run: |
-          python -m pip install --upgrade pip build
-          python -m compileall -q src/
-          python -m build --wheel --outdir /tmp/wheel
-          ls -la /tmp/wheel
+          for p in patches/*.patch; do
+            echo "== $p"
+            git apply --check --numstat "$p" 2>/dev/null \
+              || echo "   (cannot check against this tree, the build verifies it)"
+            grep -qE '^\+\+\+ b/' "$p" || { echo "   malformed: no +++ b/ header"; exit 1; }
+          done
 
       - name: Log in to the container registry
         if: github.event_name != 'pull_request'

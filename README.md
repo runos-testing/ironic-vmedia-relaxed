@@ -1,7 +1,7 @@
 # ironic-vmedia-relaxed
 
-An out-of-tree [Ironic](https://docs.openstack.org/ironic/) boot interface that
-provides Redfish virtual-media booting **without the vendor firmware gate**.
+An [Ironic](https://docs.openstack.org/ironic/) image that makes the Redfish
+virtual-media vendor gate optional, behind a config option that defaults to off.
 
 ## The problem
 
@@ -23,35 +23,62 @@ not at all, and failing early with a clear message is far better than failing
 deep inside a deploy. But it is wrong for *individual* machines that fall outside
 the window and nonetheless work.
 
-## What this provides
+## What this changes
 
-Two things, both registered through setuptools entry points, which is Ironic's
-supported out-of-tree extension mechanism. No Ironic source is patched.
+One config option, `[redfish]skip_vendor_validation`, default `false`. While it
+is false this image behaves exactly like the stock one. Set it to true and
+`_validate_vendor` logs a warning and returns instead of raising.
 
-**A boot interface, `redfish-virtual-media-relaxed`.** It subclasses the stock
-one and overrides exactly one method: `_validate_vendor` becomes a no-op. Boot
-ISO generation, media insertion and ejection, boot device selection and cleanup
-are all inherited unmodified.
+Nothing else is touched. There is no new boot interface, no new hardware type,
+and no change to boot ISO generation, media insertion or ejection, boot device
+selection or cleanup. Nodes keep the stock `redfish` driver and the stock
+`redfish-virtual-media` boot interface, so anything that drives Ironic keeps
+working unchanged, the Bare Metal Operator included.
 
-**A hardware type, `redfish-relaxed`.** This is required, not optional. Enabling
-a boot interface is only half of what Ironic needs: each hardware type publishes
-a fixed list of interface classes it accepts, and the stock `redfish` type names
-only the stock classes. Without the hardware type, a node rejects the interface
-even though the conductor has loaded it:
+The complete change is in [`patches/`](patches/), about 25 lines.
 
+## Why this is a patch and not a plugin
+
+Ironic has a supported out-of-tree extension mechanism: setuptools entry points
+for hardware types and interfaces. That route was tried first and it does not
+work for this, for two independent reasons.
+
+**A subclassed boot interface is rejected by the stock hardware type.** Ironic
+compares by exact type identity, not `isinstance`:
+
+```python
+supported_impls = getattr(hw_type, 'supported_%s_interfaces' % interface_type)
+if type(impl_instance) not in supported_impls:
+    raise exception.IncompatibleInterface(...)
 ```
-boot interface implementation '<RelaxedRedfishVirtualMediaBoot object>'
-is not supported by hardware type RedfishHardware.
+
+So `RedfishHardware` rejects a subclass of `RedfishVirtualMediaBoot`, and using
+the interface requires shipping a hardware type as well.
+
+**But an out-of-tree hardware type cannot publish images.** Virtual media boot
+must publish its boot ISO, and the publisher is selected from a map keyed on the
+driver *name*, built as a local variable inside the function:
+
+```python
+def update_driver_config(self, driver):
+    _SWIFT_MAP = {"redfish": {...}, "idrac": {...}}
+    if driver not in _SWIFT_MAP:
+        raise exception.UnsupportedDriverExtension(
+            _("Publishing images is not supported for driver %s") % driver)
 ```
 
-`redfish-relaxed` subclasses `RedfishHardware` and appends the relaxed interface
-to the supported list, changing nothing else. It is appended last, so the
-default interface on a `redfish-relaxed` node is the same as on a `redfish`
-node. Choosing the relaxed interface stays an explicit act.
+The map is rebuilt on every call, so it cannot be extended from outside, and any
+hardware type not named `redfish` or `idrac` fails at deploy time with
+`Publishing images is not supported for driver <name>`.
 
-## Verify before you use it
+Together these mean upstream Ironic cannot support an out-of-tree virtual-media
+hardware type at all. Patching one method is the smaller and more honest change,
+and it has the practical advantage of leaving nodes on the stock driver.
 
-This interface does not make an incapable BMC capable. Confirm on the actual
+## Verify before you enable it
+
+This option does not make an incapable BMC capable. It converts a clear early
+failure into an obscure one part way through a deploy. Confirm on the actual
 hardware that the standard action exists and works:
 
 ```bash
@@ -69,7 +96,7 @@ curl -sk -u "$USER:$PASS" -X POST \
 # expect: 204, then confirm Inserted == true
 ```
 
-If the action is absent, or returns `ActionNotSupported`, this interface will not
+If the action is absent, or returns `ActionNotSupported`, this image will not
 help. Some vendors expose only an OEM-specific action under a different name, in
 which case standard virtual media is genuinely unavailable and the hardware needs
 a different boot method.
@@ -87,51 +114,42 @@ fail this way. Apache, nginx and most object stores are fine.
 
 ## Using it
 
-Install the package into an Ironic image, or use the published one:
-
 ```
 ghcr.io/runos-testing/ironic-vmedia-relaxed:latest
 ```
 
-Then enable **both** the hardware type and the boot interface. Enabling only
-one of them does nothing useful:
+Pin to a `sha-<commit>` tag in anything you care about. Then enable the option:
 
 ```ini
-enabled_hardware_types  = redfish,redfish-relaxed
-enabled_boot_interfaces = redfish-virtual-media,redfish-virtual-media-relaxed,ipxe,pxe
+[redfish]
+skip_vendor_validation = true
 ```
 
-Note that `ironic.conf` is not the only place these can come from. The Metal3
-Ironic image also honours oslo.config's environment variables, so a deployment
-may set `OS_DEFAULT__ENABLED_BOOT_INTERFACES` instead, and the rendered
-`ironic.conf` will still show the stock list. Check the running service, not the
-file:
+Under Metal3, set it through the `Ironic` custom resource:
 
-```bash
-# The conductor log lists what it actually loaded
-... INFO ironic.common.driver_factory Loaded the following boot interfaces: [...]
+```yaml
+spec:
+  images:
+    ironic: ghcr.io/runos-testing/ironic-vmedia-relaxed:sha-<commit>
+  extraConfig:
+    - group: redfish
+      name: skip_vendor_validation
+      value: "true"
 ```
 
-Then select them per node:
-
-```bash
-openstack baremetal node set <node> \
-  --driver redfish-relaxed \
-  --boot-interface redfish-virtual-media-relaxed
-```
-
-Under Metal3, set the config through the `Ironic` custom resource's
-`extraConfig`. Note that the Bare Metal Operator chooses a node's driver and
-boot interface from the `BareMetalHost` BMC address scheme, so confirm which
-values it sets before assuming a `BareMetalHost` will pick these up.
+Note that the rendered `ironic.conf` is not where this ends up. The Metal3 Ironic
+image also honours oslo.config's environment variable support, so the operator
+passes the value as `OS_REDFISH__SKIP_VENDOR_VALIDATION` and the config file
+still shows the stock content. Check the running service, not the file.
 
 ## Compatibility
 
-Built against Ironic 38.0 (`quay.io/metal3-io/ironic:release-38.0`). Because it
-subclasses a stock interface, it is sensitive to changes in that class. Pin the
-base image and re-test on Ironic upgrades.
+Built against Ironic 38.0 (`quay.io/metal3-io/ironic:release-38.0`). The patch is
+anchored on surrounding source lines, so a base image whose source has moved
+fails the build rather than silently producing an unpatched image. Pin the base
+image and re-test on Ironic upgrades.
 
 ## Licence
 
-Apache 2.0, matching Ironic. Portions of the behaviour documented here describe
-Ironic's own interfaces; see [openstack/ironic](https://opendev.org/openstack/ironic).
+Apache 2.0, matching Ironic. The patch modifies Ironic source; see
+[openstack/ironic](https://opendev.org/openstack/ironic).
