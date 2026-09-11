@@ -112,6 +112,53 @@ licensing or path problem.
 Python's `http.server` from the standard library does not support ranges and will
 fail this way. Apache, nginx and most object stores are fine.
 
+### The BMC may accept a boot override and ignore it
+
+Passing the vendor check only gets the media attached. A separate problem on
+older hardware is whether the machine actually boots it.
+
+Ironic sets the standard Redfish one-time boot override to `Cd`. Some BMCs
+accept that request, report it back, consume it on the next boot, and boot the
+internal disk anyway. There is no error. The symptom is an inspection or deploy
+that hangs forever while the ramdisk never calls home, and the machine quietly
+running whatever was already installed on it.
+
+Two settings can be responsible, and they are not the same one:
+
+- A first-boot-device setting (on Dell, `iDRAC.serverboot.FirstBootDevice`)
+  applies to **legacy BIOS** boot. Setting it on a UEFI machine changes nothing,
+  and it reports success while doing so.
+- In UEFI mode the machine obeys its **UEFI boot sequence**
+  (`BIOS.BiosBootSettings.UefiBootSeq` on Dell). After an OS is installed, the
+  internal disk sits at the top of that list and the virtual optical device at
+  the bottom, so the disk always wins.
+
+To check what the machine will really do:
+
+```bash
+racadm get BIOS.BiosBootSettings
+# BootMode=Uefi                       <- decides which list below matters
+# UefiBootSeq=RAID.Integrated.1-1,...,Optical.iDRACVirtual.1-1
+#             ^ disk first                  ^ virtual CD last
+```
+
+The fix is to reorder that list so the virtual optical device is first, then
+commit it as a BIOS job and let the machine reboot:
+
+```bash
+racadm set BIOS.BiosBootSettings.UefiBootSeq Optical.iDRACVirtual.1-1,<the rest>
+racadm jobqueue create BIOS.Setup.1-1 -r pwrcycle -s TIME_NOW
+```
+
+Leaving the virtual device permanently first is usually what you want on a
+machine managed this way: with no media attached the firmware falls through to
+the next entry, and with media attached the provisioner wins.
+
+A quick way to tell which of the two happened, without a console: if the host's
+existing OS answers on its usual port, it booted the disk. The agent ramdisk
+serves its API on TCP 9999, so that port opening is positive proof the ramdisk
+booted rather than an absence of evidence.
+
 ## Using it
 
 ```
