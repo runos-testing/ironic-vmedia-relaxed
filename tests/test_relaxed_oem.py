@@ -41,11 +41,21 @@ def load(name):
 class FakeConn(object):
     """Records what would have been sent to the BMC."""
 
-    def __init__(self, post_exc=None, patch_exc=None):
+    def __init__(self, post_exc=None, patch_exc=None, gets=None):
         self.posts = []
         self.patches = []
+        self.got = []
         self._post_exc = post_exc
         self._patch_exc = patch_exc
+        self._gets = gets or {}
+
+    def get(self, path):
+        self.got.append(path)
+        for key, payload in self._gets.items():
+            if path.endswith(key):
+                return types.SimpleNamespace(json=lambda p=payload: p)
+        raise sushy_exc.ResourceNotFoundError('GET', path, types.SimpleNamespace(
+            status_code=404, json=lambda: {}, content=b'', text='nf'))
 
     def post(self, path, data=None):
         self.posts.append((path, data))
@@ -100,6 +110,17 @@ def fake_task():
     # rather than a stub: that keeps these tests honest about upstream code.
     driver = types.SimpleNamespace(boot=rb.RedfishVirtualMediaBoot())
     return types.SimpleNamespace(node=node, driver=driver)
+
+
+def boot_sources(names, optical_index=None):
+    """A Dell BootSources payload. names is the boot order, top first."""
+    return {'Attributes': {'UefiBootSeq': [
+        {'Index': i, 'Enabled': True, 'Id': 'BIOS.Setup.1-1#UefiBootSeq#%s' % n,
+         'Name': n}
+        for i, n in enumerate(names)]}}
+
+
+MANAGERS = {'Members': [{'@odata.id': '/redfish/v1/Managers/iDRAC.Embedded.1'}]}
 
 
 def bad_request(msg='rejected'):
@@ -334,3 +355,90 @@ class UpstreamContract(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class BootOrder(unittest.TestCase):
+    """Some BMCs accept the boot override, report it, and ignore it.
+
+    The UEFI boot sequence is what actually decides, and an OS install pushes
+    the internal disk back on top, so this has to run on every attach.
+    """
+
+    DISK_FIRST = ['RAID.Integrated.1-1', 'NIC.Embedded.1-1-1',
+                  'Optical.iDRACVirtual.1-1']
+    CD_FIRST = ['Optical.iDRACVirtual.1-1', 'RAID.Integrated.1-1',
+                'NIC.Embedded.1-1-1']
+    # With no media attached the virtual optical entry does not exist at all.
+    NO_OPTICAL = ['RAID.Integrated.1-1', 'NIC.Embedded.1-1-1']
+
+    def setUp(self):
+        CONF.set_override('enable_oem_boot_order', True, group='redfish')
+        self.task = fake_task()
+        self.task.node.driver_info = {
+            'redfish_system_id': '/redfish/v1/Systems/System.Embedded.1'}
+
+    def tearDown(self):
+        CONF.set_override('enable_oem_boot_order', False, group='redfish')
+
+    def _vm(self, names):
+        conn = FakeConn(gets={'/BootSources': boot_sources(names),
+                              '/redfish/v1/Managers': MANAGERS})
+        return fake_vmedia({'Id': '1'}, conn=conn), conn
+
+    def test_disabled_by_default(self):
+        CONF.set_override('enable_oem_boot_order', False, group='redfish')
+        vm, conn = self._vm(self.DISK_FIRST)
+        self.assertFalse(relaxed_oem.ensure_vmedia_first(self.task, vm))
+        self.assertEqual([], conn.patches)
+
+    def test_reorders_when_the_disk_is_first(self):
+        vm, conn = self._vm(self.DISK_FIRST)
+        self.assertTrue(relaxed_oem.ensure_vmedia_first(self.task, vm))
+        self.assertEqual(1, len(conn.patches))
+        _, body = conn.patches[0]
+        order = [e['Name'] for e in body['Attributes']['UefiBootSeq']]
+        self.assertEqual('Optical.iDRACVirtual.1-1', order[0])
+        # every entry must survive: the firmware rejects a partial list
+        self.assertCountEqual(self.DISK_FIRST, order)
+        # indices must be renumbered from zero
+        self.assertEqual(list(range(len(order))),
+                         [e['Index'] for e in body['Attributes']['UefiBootSeq']])
+
+    def test_schedules_a_job_so_the_change_applies(self):
+        vm, conn = self._vm(self.DISK_FIRST)
+        relaxed_oem.ensure_vmedia_first(self.task, vm)
+        self.assertEqual(1, len(conn.posts))
+        path, body = conn.posts[0]
+        self.assertTrue(path.endswith('/Jobs'))
+        self.assertIn('BootSources/Settings', body['TargetSettingsURI'])
+
+    def test_no_change_when_already_first(self):
+        vm, conn = self._vm(self.CD_FIRST)
+        self.assertTrue(relaxed_oem.ensure_vmedia_first(self.task, vm))
+        self.assertEqual([], conn.patches, 'must not rewrite a correct order')
+
+    def test_refuses_when_the_entry_is_absent(self):
+        # THE TRAP: with no media attached the entry is gone, and a request
+        # naming a missing entry returns 200 while doing nothing. Reporting
+        # success there would hide a machine that boots its own disk.
+        vm, conn = self._vm(self.NO_OPTICAL)
+        self.assertFalse(relaxed_oem.ensure_vmedia_first(self.task, vm))
+        self.assertEqual([], conn.patches)
+
+    def test_silent_on_a_bmc_without_bootsources(self):
+        conn = FakeConn(gets={'/redfish/v1/Managers': MANAGERS})
+        vm = fake_vmedia({'Id': '1'}, conn=conn)
+        self.assertFalse(relaxed_oem.ensure_vmedia_first(self.task, vm))
+
+    def test_reports_failure_if_the_job_cannot_be_scheduled(self):
+        vm, conn = self._vm(self.DISK_FIRST)
+        conn._post_exc = bad_request()
+        self.assertFalse(relaxed_oem.ensure_vmedia_first(self.task, vm),
+                         'a reorder that cannot be applied is not a success')
+
+    def test_standard_insert_path_also_fixes_the_order(self):
+        # The Dell uses the STANDARD insert, so the hook must be on that path
+        # too, not only on the OEM one.
+        import inspect
+        self.assertIn('relaxed_oem.ensure_vmedia_first',
+                      inspect.getsource(rb._insert_vmedia_in_resource))

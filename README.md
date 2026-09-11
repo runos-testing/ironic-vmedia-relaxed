@@ -54,6 +54,38 @@ to honour the standard `Boot` override either.
 **This fallback is reached only when the standard action is missing**, so it
 cannot change behaviour on a BMC that implements it.
 
+### `[redfish]enable_oem_boot_order`
+
+For a third failure, which is separate from both of the above and bites even a
+BMC whose virtual media works perfectly.
+
+Ironic sets the standard Redfish one-time boot override to `Cd`. Some BMCs
+accept that, report it back, consume it on the next boot, and boot the internal
+disk anyway. **There is no error.** The symptom is a deploy or inspection that
+hangs forever while the ramdisk never calls home, and the machine quietly
+running whatever was already installed on it.
+
+On those machines the vendor UEFI boot sequence is what actually decides. With
+this option on, the code moves the virtual optical device to the top of that
+sequence after attaching media, and schedules the configuration job that
+applies it on the boot Ironic is about to perform anyway.
+
+Two things make this subtler than it looks, and both are enforced in code and
+covered by tests:
+
+- **It is not a one-time fix.** Installing an OS makes the firmware re-enumerate
+  and push the internal disk back to the top, so the order must be re-asserted
+  before *every* deployment. Measured on real hardware: the first deploy worked,
+  the second booted the freshly installed disk instead.
+- **The virtual optical entry exists only while media is attached.** With
+  nothing attached the entry is absent, and a request naming a missing entry
+  returns `200` and changes nothing. The code therefore runs after the insert,
+  and refuses to report success when the entry is not there, rather than
+  silently leaving a machine that boots its own disk.
+
+Currently implements the Dell `BootSources` scheme, and does nothing on a BMC
+that does not expose it.
+
 Two details here are not what you would guess from reading the code, and both
 cost real time to find:
 
@@ -290,6 +322,8 @@ Pin to a `sha-<commit>` tag in anything you care about. Then enable the option:
 skip_vendor_validation = true
 # For a BMC that has NO standard InsertMedia action at all, e.g. HPE iLO 4
 enable_oem_vmedia_fallback = true
+# For a BMC that accepts the boot override and then ignores it
+enable_oem_boot_order = true
 ```
 
 Enable only what the hardware in front of you actually needs. They are

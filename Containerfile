@@ -64,9 +64,11 @@ from ironic.drivers.modules.redfish import boot, relaxed_oem; \
 from sushy.resources.manager.virtual_media import VirtualMedia as VM; \
 assert CONF.redfish.skip_vendor_validation is False, 'skip_vendor_validation missing or wrong default'; \
 assert CONF.redfish.enable_oem_vmedia_fallback is False, 'enable_oem_vmedia_fallback missing or wrong default'; \
+assert CONF.redfish.enable_oem_boot_order is False, 'enable_oem_boot_order missing or wrong default'; \
 assert 'relaxed_oem' in inspect.getsource(boot.RedfishVirtualMediaBoot._validate_vendor), 'vendor gate not hooked'; \
 assert inspect.getsource(boot._insert_vmedia_in_resource).count('relaxed_oem.insert') == 2, 'insert needs BOTH the MissingAction and BadRequest hooks'; \
 assert 'relaxed_oem.eject' in inspect.getsource(boot._eject_vmedia_from_resource), 'eject not hooked'; \
+assert 'relaxed_oem.ensure_vmedia_first' in inspect.getsource(boot._insert_vmedia_in_resource), 'boot order not hooked on the standard insert path'; \
 assert hasattr(VM, 'path') and hasattr(VM, 'json'), 'sushy VirtualMedia lost path/json'; \
 assert '_conn' in inspect.getsource(__import__('sushy.resources.base', fromlist=['x']).ResourceBase.__init__), 'sushy renamed the private connector attribute this module uses'; \
 print('OK: options registered, all three hooks in place, sushy API as expected')"

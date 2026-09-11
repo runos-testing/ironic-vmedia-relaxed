@@ -63,6 +63,19 @@ OPTS = [
                'attempted. This has no effect on a BMC that implements the '
                'standard action, because the fallback is reached only when '
                'the standard action is missing.')),
+    cfg.BoolOpt(
+        'enable_oem_boot_order',
+        default=False,
+        help=_('After attaching virtual media, move the virtual optical '
+               'device to the top of the vendor UEFI boot sequence. Some BMCs '
+               'accept the standard Redfish boot override, report it back, '
+               'consume it on the next boot, and boot the internal disk '
+               'anyway, with no error at all. On those machines the UEFI boot '
+               'sequence is what actually decides, and an OS installation '
+               'pushes the internal disk back to the top of it, so the order '
+               'has to be re-asserted before every deployment rather than '
+               'once. Currently implements the Dell BootSources scheme. Has '
+               'no effect on a BMC that does not expose it.')),
 ]
 
 # Registered on import. boot.py imports this module, and that happens while the
@@ -143,6 +156,109 @@ def insert(task, v_media, boot_url):
              'standard InsertMedia action.',
              {'slot': v_media.identity, 'node': task.node.uuid,
               'vendor': vendor})
+    ensure_vmedia_first(task, v_media)
+    return True
+
+
+def _managers_jobs_uri(conn):
+    """Find the vendor job queue used to schedule a pending BIOS change."""
+    try:
+        managers = conn.get('/redfish/v1/Managers').json()
+    except sushy.exceptions.SushyError:
+        return None
+    members = managers.get('Members') or []
+    if not members:
+        return None
+    return members[0]['@odata.id'].rstrip('/') + '/Jobs'
+
+
+def ensure_vmedia_first(task, v_media):
+    """Put the virtual optical device at the top of the UEFI boot sequence.
+
+    Only meaningful on a BMC that ignores the standard Redfish boot override.
+    Reached after a successful insert, because the virtual optical device
+    appears in the boot sequence ONLY while media is attached: with nothing
+    attached the entry does not exist, and a request naming it succeeds and
+    silently changes nothing.
+
+    :returns: True if the order was already correct or was changed, False if
+        this BMC does not expose the scheme or the entry was not present.
+    """
+    if not CONF.redfish.enable_oem_boot_order:
+        return False
+
+    system_id = (task.node.driver_info or {}).get('redfish_system_id')
+    if not system_id:
+        return False
+    base = system_id.rstrip('/')
+    conn = v_media._conn
+
+    try:
+        sources = conn.get(base + '/BootSources').json()
+    except sushy.exceptions.SushyError:
+        # Not a BMC that exposes this. Nothing to do and nothing to warn about.
+        return False
+
+    seq = (sources.get('Attributes') or {}).get('UefiBootSeq')
+    if not seq:
+        return False
+
+    target = None
+    for entry in seq:
+        name = entry.get('Name') or ''
+        if 'Optical' in name and 'Virtual' in name:
+            target = entry
+            break
+
+    if target is None:
+        # Do NOT report success here. The entry is absent, which usually means
+        # the media is not attached yet, and a request naming a missing entry
+        # returns 200 while doing nothing.
+        LOG.warning('No virtual optical entry in the UEFI boot sequence for '
+                    'node %s, so the boot order was left alone. The machine '
+                    'may boot its internal disk instead of the attached '
+                    'media.', task.node.uuid)
+        return False
+
+    if target.get('Index') == 0:
+        LOG.debug('Virtual optical device is already first in the UEFI boot '
+                  'sequence for node %s.', task.node.uuid)
+        return True
+
+    ordered = [target] + [e for e in seq if e is not target]
+    payload = {'Attributes': {'UefiBootSeq': [
+        {'Index': i,
+         'Enabled': e.get('Enabled', True),
+         'Id': e['Id'],
+         'Name': e['Name']}
+        for i, e in enumerate(ordered)]}}
+
+    try:
+        conn.patch(base + '/BootSources/Settings', data=payload)
+    except sushy.exceptions.SushyError as exc:
+        LOG.warning('Could not reorder the UEFI boot sequence for node '
+                    '%(node)s: %(exc)s',
+                    {'node': task.node.uuid, 'exc': exc})
+        return False
+
+    # The change is pending until a configuration job applies it on the next
+    # boot, which is the boot Ironic is about to perform anyway.
+    jobs_uri = _managers_jobs_uri(conn)
+    if jobs_uri:
+        try:
+            conn.post(jobs_uri,
+                      data={'TargetSettingsURI': base + '/BootSources/Settings'})
+        except sushy.exceptions.SushyError as exc:
+            LOG.warning('Reordered the UEFI boot sequence for node %(node)s '
+                        'but could not schedule the configuration job, so it '
+                        'may not take effect: %(exc)s',
+                        {'node': task.node.uuid, 'exc': exc})
+            return False
+
+    LOG.info('Moved the virtual optical device to the top of the UEFI boot '
+             'sequence for node %s. An OS installation pushes the internal '
+             'disk back to the top, so this is re-asserted on every attach.',
+             task.node.uuid)
     return True
 
 

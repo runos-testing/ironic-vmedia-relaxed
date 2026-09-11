@@ -28,7 +28,17 @@
              err_msg = ("Inserting virtual media into %(boot_device)s "
                         "failed for node %(node)s, moving to next virtual "
                         "media device, if available. %(exc)s" %
-@@ -564,7 +571,12 @@
+@@ -472,6 +479,9 @@
+                 continue
+             raise
+ 
++        # The standard insert worked, but some BMCs ignore the boot override,
++        # so the media may still not be what boots.
++        relaxed_oem.ensure_vmedia_first(task, v_media)
+         LOG.info("Inserted boot media %(boot_url)s into "
+                  "%(boot_device)s for node "
+                  "%(node)s", {'node': task.node.uuid,
+@@ -564,7 +574,12 @@
                  continue
          inserted = v_media.inserted
          if inserted:
@@ -42,7 +52,7 @@
              found = True
  
          LOG.info("Boot media is%(already)s ejected from "
-@@ -912,6 +924,12 @@
+@@ -912,6 +927,12 @@
              with node.
          :raises: InvalidParameterValue if vendor not supported
          """
