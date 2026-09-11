@@ -36,7 +36,7 @@
  
 --- a/ironic/drivers/modules/redfish/boot.py
 +++ b/ironic/drivers/modules/redfish/boot.py
-@@ -334,8 +334,102 @@
+@@ -334,8 +334,117 @@
              'url': boot_url
          }
      raise exception.InvalidParameterValue(exc_msg)
@@ -51,8 +51,8 @@
 +# These helpers are reached ONLY when the standard action is absent, so they
 +# cannot change behaviour on a BMC that implements it.
 +_OEM_VENDORS = ('Hp', 'Hpe')
- 
- 
++
++
 +def _oem_vmedia_action(v_media, verb):
 +    """Find a vendor OEM virtual media action on a device.
 +
@@ -85,19 +85,34 @@
 +    if not target:
 +        return False
 +
-+    # BootOnNextServerReset is the iLO equivalent of a one-time boot override.
-+    # It is set here because a BMC lacking the standard InsertMedia action is
-+    # also unlikely to honour the standard Boot override, and inserting media
-+    # the machine will not boot is not useful.
-+    payload = {'Image': boot_url,
-+               'Oem': {vendor: {'BootOnNextServerReset': True}}}
++    # NOTE(relaxed): the action takes Image and NOTHING else. Passing an Oem
++    # block in the POST body is rejected with
++    #   Base.0.10.ActionParameterUnknown: ['InsertVirtualMedia', 'Oem']
 +    try:
-+        v_media._conn.post(target, data=payload)
++        v_media._conn.post(target, data={'Image': boot_url})
 +    except sushy.exceptions.SushyError as exc:
 +        LOG.warning('OEM virtual media insert via %(vendor)s failed for node '
 +                    '%(node)s: %(exc)s',
 +                    {'vendor': vendor, 'node': task.node.uuid, 'exc': exc})
 +        return False
++
++    # BootOnNextServerReset is the iLO equivalent of a one-time boot override,
++    # and it is a PROPERTY, set by a separate PATCH of the device, not a
++    # parameter of the action above. It is set because a BMC lacking the
++    # standard InsertMedia action is also unlikely to honour the standard Boot
++    # override, and media the machine will not boot is not useful.
++    #
++    # Best effort: the media is already attached at this point, so a failure
++    # here is worth a warning but must not undo a successful insert.
++    try:
++        v_media._conn.patch(
++            v_media.path,
++            data={'Oem': {vendor: {'BootOnNextServerReset': True}}})
++    except sushy.exceptions.SushyError as exc:
++        LOG.warning('Could not set BootOnNextServerReset via %(vendor)s for '
++                    'node %(node)s, the media is attached but the machine may '
++                    'not boot it: %(exc)s',
++                    {'vendor': vendor, 'node': task.node.uuid, 'exc': exc})
 +
 +    LOG.info('Inserted boot media into %(slot)s on node %(node)s using the '
 +             '%(vendor)s OEM action, because this BMC does not implement the '
@@ -105,8 +120,8 @@
 +             {'slot': v_media.identity, 'node': task.node.uuid,
 +              'vendor': vendor})
 +    return True
-+
-+
+ 
+ 
 +def _oem_eject_vmedia(task, v_media):
 +    """Eject virtual media using a vendor OEM action.
 +
@@ -139,7 +154,7 @@
  @tenacity.retry(retry=tenacity.retry_if_exception(_test_retry),
                  stop=tenacity.stop_after_attempt(3),
                  wait=tenacity.wait_fixed(3),
-@@ -424,16 +518,31 @@
+@@ -424,16 +533,31 @@
          # via WebSocket/NBD and do not have the InsertMedia action.
          # Catch MissingActionError and try the next available device.
          except sushy.exceptions.MissingActionError:
@@ -175,7 +190,7 @@
              err_msg = ("Inserting virtual media into %(boot_device)s "
                         "failed for node %(node)s, moving to next virtual "
                         "media device, if available. %(exc)s" %
-@@ -564,7 +673,15 @@
+@@ -564,7 +688,15 @@
                  continue
          inserted = v_media.inserted
          if inserted:
@@ -192,7 +207,7 @@
              found = True
  
          LOG.info("Boot media is%(already)s ejected from "
-@@ -912,6 +1029,14 @@
+@@ -912,6 +1044,14 @@
              with node.
          :raises: InvalidParameterValue if vendor not supported
          """
