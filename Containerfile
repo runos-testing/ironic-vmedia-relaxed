@@ -25,7 +25,7 @@ COPY patches/ /tmp/patches/
 # build.
 RUN microdnf install -y patch \
  && patch -p1 --forward --batch -d "${SITE_PACKAGES}" \
-        < /tmp/patches/0001-redfish-add-skip-vendor-validation-option.patch
+        < /tmp/patches/0001-redfish-older-bmc-support.patch
 
 # ---- final: stock image plus the two patched files --------------------------
 FROM ${IRONIC_IMAGE}
@@ -51,7 +51,12 @@ RUN python3.12 -c "\
 import inspect; \
 from ironic.conf import CONF; \
 from ironic.drivers.modules.redfish import boot; \
-assert CONF.redfish.skip_vendor_validation is False, 'option missing or wrong default'; \
+assert CONF.redfish.skip_vendor_validation is False, 'skip_vendor_validation missing or wrong default'; \
+assert CONF.redfish.enable_oem_vmedia_fallback is False, 'enable_oem_vmedia_fallback missing or wrong default'; \
 src = inspect.getsource(boot.RedfishVirtualMediaBoot._validate_vendor); \
-assert 'skip_vendor_validation' in src, 'gate does not read the option'; \
-print('OK: option registered, defaults False, gate reads it')"
+assert 'skip_vendor_validation' in src, 'vendor gate does not read its option'; \
+assert hasattr(boot, '_oem_insert_vmedia'), 'OEM insert helper missing'; \
+assert hasattr(boot, '_oem_eject_vmedia'), 'OEM eject helper missing'; \
+assert '_oem_insert_vmedia' in inspect.getsource(boot._insert_vmedia_in_resource), 'insert path does not call the OEM fallback'; \
+assert '_oem_eject_vmedia' in inspect.getsource(boot._eject_vmedia_from_resource), 'eject path does not call the OEM fallback'; \
+print('OK: both options registered and defaulting False, both fallbacks wired in')"

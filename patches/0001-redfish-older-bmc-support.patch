@@ -1,0 +1,191 @@
+--- a/ironic/conf/redfish.py
++++ b/ironic/conf/redfish.py
+@@ -278,6 +278,33 @@
+                help=_('Number of seconds to wait between power-on retries '
+                       'triggered by an HTTP 409 '
+                       '"ActionParameterValueConflict" from the BMC.')),
++    cfg.BoolOpt('skip_vendor_validation',
++                default=False,
++                help=_('Skip the vendor and firmware check that the '
++                       'redfish-virtual-media boot interface performs before '
++                       'it will operate on a node. By default that interface '
++                       'refuses any BMC reporting a Dell vendor string whose '
++                       'firmware major version is not 6 or 7. The check is a '
++                       'blanket policy rather than a capability probe, so it '
++                       'also rejects BMCs that implement the standard '
++                       'VirtualMedia.InsertMedia action correctly. Set this '
++                       'to true ONLY where standard Redfish virtual media has '
++                       'been verified on the hardware in question. It does '
++                       'not make an incapable BMC capable, and enabling it '
++                       'blindly turns a clear early failure into an obscure '
++                       'one part way through a deployment.')),
++    cfg.BoolOpt('enable_oem_vmedia_fallback',
++                default=False,
++                help=_('Allow virtual media to be inserted and ejected with a '
++                       'vendor OEM action when the BMC does not implement the '
++                       'standard VirtualMedia.InsertMedia action at all. Some '
++                       'older BMCs, notably HPE iLO 4, advertise no standard '
++                       'action and expose an OEM one instead, which the stock '
++                       'code skips, leaving no usable device. Only HPE iLO '
++                       '(Hp and Hpe) OEM actions are attempted. This has no '
++                       'effect on a BMC that implements the standard action, '
++                       'because the fallback is reached only when the '
++                       'standard action is missing.')),
+ ]
+ 
+ 
+--- a/ironic/drivers/modules/redfish/boot.py
++++ b/ironic/drivers/modules/redfish/boot.py
+@@ -334,8 +334,102 @@
+             'url': boot_url
+         }
+     raise exception.InvalidParameterValue(exc_msg)
++
++
++# NOTE(relaxed): HPE iLO 4 (and some iLO 5 firmware) do not implement the
++# standard #VirtualMedia.InsertMedia action at all. They advertise an OEM
++# action instead, under Oem/Hp or Oem/Hpe. The stock code treats a missing
++# standard action as "this slot cannot do remote media" and skips the device,
++# which on those BMCs skips every device and leaves nothing to boot.
++#
++# These helpers are reached ONLY when the standard action is absent, so they
++# cannot change behaviour on a BMC that implements it.
++_OEM_VENDORS = ('Hp', 'Hpe')
++
++
++def _oem_vmedia_action(v_media, verb):
++    """Find a vendor OEM virtual media action on a device.
++
++    :param v_media: a sushy VirtualMedia resource.
++    :param verb: either 'Insert' or 'Eject'.
++    :returns: a (vendor, target_uri) tuple, or (None, None) if not found.
++    """
++    oem = v_media.json.get('Oem') or {}
++    for vendor in _OEM_VENDORS:
++        actions = (oem.get(vendor) or {}).get('Actions') or {}
++        key = '#%siLOVirtualMedia.%sVirtualMedia' % (vendor, verb)
++        target = (actions.get(key) or {}).get('target')
++        if target:
++            return vendor, target
++    return None, None
+ 
+ 
++def _oem_insert_vmedia(task, v_media, boot_url):
++    """Insert virtual media using a vendor OEM action.
++
++    :param task: a TaskManager instance.
++    :param v_media: a sushy VirtualMedia resource.
++    :param boot_url: URL of the image to insert.
++    :returns: True if an OEM action was found and accepted, else False.
++    """
++    if not CONF.redfish.enable_oem_vmedia_fallback:
++        return False
++
++    vendor, target = _oem_vmedia_action(v_media, 'Insert')
++    if not target:
++        return False
++
++    # BootOnNextServerReset is the iLO equivalent of a one-time boot override.
++    # It is set here because a BMC lacking the standard InsertMedia action is
++    # also unlikely to honour the standard Boot override, and inserting media
++    # the machine will not boot is not useful.
++    payload = {'Image': boot_url,
++               'Oem': {vendor: {'BootOnNextServerReset': True}}}
++    try:
++        v_media._conn.post(target, data=payload)
++    except sushy.exceptions.SushyError as exc:
++        LOG.warning('OEM virtual media insert via %(vendor)s failed for node '
++                    '%(node)s: %(exc)s',
++                    {'vendor': vendor, 'node': task.node.uuid, 'exc': exc})
++        return False
++
++    LOG.info('Inserted boot media into %(slot)s on node %(node)s using the '
++             '%(vendor)s OEM action, because this BMC does not implement the '
++             'standard InsertMedia action.',
++             {'slot': v_media.identity, 'node': task.node.uuid,
++              'vendor': vendor})
++    return True
++
++
++def _oem_eject_vmedia(task, v_media):
++    """Eject virtual media using a vendor OEM action.
++
++    :param task: a TaskManager instance.
++    :param v_media: a sushy VirtualMedia resource.
++    :returns: True if an OEM action was found and accepted, else False.
++    """
++    if not CONF.redfish.enable_oem_vmedia_fallback:
++        return False
++
++    vendor, target = _oem_vmedia_action(v_media, 'Eject')
++    if not target:
++        return False
++
++    try:
++        v_media._conn.post(target, data={})
++    except sushy.exceptions.SushyError as exc:
++        LOG.warning('OEM virtual media eject via %(vendor)s failed for node '
++                    '%(node)s: %(exc)s',
++                    {'vendor': vendor, 'node': task.node.uuid, 'exc': exc})
++        return False
++
++    LOG.info('Ejected boot media from %(slot)s on node %(node)s using the '
++             '%(vendor)s OEM action.',
++             {'slot': v_media.identity, 'node': task.node.uuid,
++              'vendor': vendor})
++    return True
++
++
+ @tenacity.retry(retry=tenacity.retry_if_exception(_test_retry),
+                 stop=tenacity.stop_after_attempt(3),
+                 wait=tenacity.wait_fixed(3),
+@@ -424,10 +518,14 @@
+         # via WebSocket/NBD and do not have the InsertMedia action.
+         # Catch MissingActionError and try the next available device.
+         except sushy.exceptions.MissingActionError:
+-            LOG.info("Virtual media device %(slot)s on node %(node)s does "
+-                     "not support InsertMedia action, skipping.",
+-                     {'slot': v_media.identity, 'node': task.node.uuid})
+-            continue
++            # NOTE(relaxed): before skipping, try a vendor OEM action. On
++            # HPE iLO 4 every slot lacks the standard action, so skipping
++            # here leaves the node with no bootable media at all.
++            if not _oem_insert_vmedia(task, v_media, boot_url):
++                LOG.info("Virtual media device %(slot)s on node %(node)s does "
++                         "not support InsertMedia action, skipping.",
++                         {'slot': v_media.identity, 'node': task.node.uuid})
++                continue
+         # NOTE(janders): On Cisco UCSB and UCSX blades there are several
+         # vMedia devices. Some of those are only meant for internal use
+         # by CIMC vKVM - attempts to InsertMedia into those will result
+@@ -564,7 +662,14 @@
+                 continue
+         inserted = v_media.inserted
+         if inserted:
+-            v_media.eject_media()
++            # NOTE(relaxed): same OEM fallback as the insert path. A BMC with
++            # no standard InsertMedia generally has no standard EjectMedia
++            # either, and failing to eject leaves media attached.
++            try:
++                v_media.eject_media()
++            except sushy.exceptions.MissingActionError:
++                if not _oem_eject_vmedia(task, v_media):
++                    raise
+             found = True
+ 
+         LOG.info("Boot media is%(already)s ejected from "
+@@ -912,6 +1017,14 @@
+             with node.
+         :raises: InvalidParameterValue if vendor not supported
+         """
++        if CONF.redfish.skip_vendor_validation:
++            LOG.warning(
++                'Skipping the vendor and firmware check for node %s because '
++                '[redfish]skip_vendor_validation is enabled. Standard Redfish '
++                'virtual media is assumed to work on this hardware.',
++                task.node.uuid)
++            return
++
+         vendor = task.node.properties.get('vendor')
+         if not vendor:
+             return

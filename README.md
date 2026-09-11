@@ -25,17 +25,40 @@ the window and nonetheless work.
 
 ## What this changes
 
-One config option, `[redfish]skip_vendor_validation`, default `false`. While it
-is false this image behaves exactly like the stock one. Set it to true and
-`_validate_vendor` logs a warning and returns instead of raising.
+Two config options, both `false` by default. While both are false this image
+behaves exactly like the stock one.
 
-Nothing else is touched. There is no new boot interface, no new hardware type,
-and no change to boot ISO generation, media insertion or ejection, boot device
-selection or cleanup. Nodes keep the stock `redfish` driver and the stock
-`redfish-virtual-media` boot interface, so anything that drives Ironic keeps
-working unchanged, the Bare Metal Operator included.
+### `[redfish]skip_vendor_validation`
 
-The complete change is in [`patches/`](patches/), about 25 lines.
+Set it to true and `_validate_vendor` logs a warning and returns instead of
+raising. That is the whole change: the gate described above stops firing.
+
+### `[redfish]enable_oem_vmedia_fallback`
+
+For the harder case, a BMC that does not implement the standard
+`#VirtualMedia.InsertMedia` action **at all**. HPE iLO 4 is the example: it
+reports `"Actions": {}` on every virtual media device and exposes an OEM action
+under `Oem/Hp` instead.
+
+The stock code treats a missing standard action as "this slot cannot do remote
+media" and moves to the next device. On such a BMC every device is skipped, so
+nothing is ever attached and the failure looks like a machine with no virtual
+media at all.
+
+With this option on, the insert and eject paths try the vendor OEM action
+before giving up. Only HPE iLO actions are attempted (`Oem/Hp` and `Oem/Hpe`).
+The insert also sets `BootOnNextServerReset`, which is the iLO equivalent of a
+one-time boot override, because a BMC missing the standard action is unlikely
+to honour the standard `Boot` override either.
+
+**This fallback is reached only when the standard action is missing**, so it
+cannot change behaviour on a BMC that implements it.
+
+Nodes keep the stock `redfish` driver and the stock `redfish-virtual-media`
+boot interface in both cases, so anything that drives Ironic keeps working
+unchanged, the Bare Metal Operator included.
+
+The complete change is in [`patches/`](patches/).
 
 ## Why this is a patch and not a plugin
 
@@ -169,8 +192,15 @@ Pin to a `sha-<commit>` tag in anything you care about. Then enable the option:
 
 ```ini
 [redfish]
+# For a BMC that HAS standard virtual media but is refused by the vendor gate
 skip_vendor_validation = true
+# For a BMC that has NO standard InsertMedia action at all, e.g. HPE iLO 4
+enable_oem_vmedia_fallback = true
 ```
+
+Enable only what the hardware in front of you actually needs. They are
+independent: the first is for a BMC that can do standard virtual media and is
+being refused, the second is for one that genuinely cannot.
 
 Under Metal3, set it through the `Ironic` custom resource:
 
