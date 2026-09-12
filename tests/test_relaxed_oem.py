@@ -107,6 +107,14 @@ def fake_task():
         instance_info={},
         properties={'vendor': 'Dell Inc.'})
     node.get_interface = lambda kind: 'redfish-virtual-media'
+    # The persistent-boot request writes driver_info and saves. Counted so a
+    # test can assert the node was really persisted, not just mutated in memory.
+    node.saves = 0
+
+    def _save():
+        node.saves += 1
+
+    node.save = _save
     # The insert path calls task.driver.boot, so give it the real interface
     # rather than a stub: that keeps these tests honest about upstream code.
     driver = types.SimpleNamespace(boot=rb.RedfishVirtualMediaBoot())
@@ -527,3 +535,79 @@ class BootOrder(unittest.TestCase):
         import inspect
         self.assertIn('relaxed_oem.ensure_vmedia_first',
                       inspect.getsource(rb._insert_vmedia_in_resource))
+
+
+class PersistentBootRequest(unittest.TestCase):
+    """Asking Ironic to make the boot device persistent.
+
+    MEASURED twice on one iDRAC: it accepts a one-time boot override, reports it
+    back, and clears it before the machine boots, so the machine boots its
+    internal disk and the agent never runs. A PERSISTENT override made the same
+    machine inspect immediately.
+
+    This asks through the key Ironic already reads in conductor/utils.py rather
+    than overriding the decision, so Ironic still chooses what to do with it.
+    """
+
+    def setUp(self):
+        CONF.set_override('enable_oem_vmedia_fallback', True, group='redfish')
+        CONF.set_override('force_persistent_boot_on_vmedia', True,
+                          group='redfish')
+        self.addCleanup(CONF.clear_override, 'enable_oem_vmedia_fallback',
+                        group='redfish')
+        self.addCleanup(CONF.clear_override, 'force_persistent_boot_on_vmedia',
+                        group='redfish')
+        self.task = fake_task()
+
+    def test_off_by_default_so_the_image_stays_inert(self):
+        CONF.clear_override('force_persistent_boot_on_vmedia', group='redfish')
+        self.assertFalse(CONF.redfish.force_persistent_boot_on_vmedia)
+        self.assertFalse(relaxed_oem.request_persistent_boot(self.task))
+        self.assertEqual({}, self.task.node.driver_info)
+
+    def test_sets_the_key_ironic_reads(self):
+        # ironic/conductor/utils.py honours exactly 'Always'.
+        self.assertTrue(relaxed_oem.request_persistent_boot(self.task))
+        self.assertEqual(
+            'Always',
+            self.task.node.driver_info['force_persistent_boot_device'])
+
+    def test_persists_the_node_rather_than_only_mutating_it(self):
+        relaxed_oem.request_persistent_boot(self.task)
+        self.assertEqual(1, self.task.node.saves)
+
+    def test_asking_twice_writes_once(self):
+        # Every deploy inserts media. Saving the node on each one is churn on a
+        # row other things watch.
+        relaxed_oem.request_persistent_boot(self.task)
+        relaxed_oem.request_persistent_boot(self.task)
+        self.assertEqual(1, self.task.node.saves)
+
+    def test_eject_takes_the_request_back(self):
+        """A deployed machine must be left as stock Ironic would leave it.
+
+        Left behind, the key would make every later boot device change
+        persistent too, including the one that points a finished machine at its
+        disk. That is a behaviour change nobody asked for and nobody would
+        think to look for.
+        """
+        relaxed_oem.request_persistent_boot(self.task)
+        relaxed_oem.clear_persistent_boot(self.task)
+        self.assertNotIn('force_persistent_boot_device',
+                         self.task.node.driver_info)
+
+    def test_a_key_set_elsewhere_survives(self):
+        # Only what this code added is removed.
+        self.task.node.driver_info['force_persistent_boot_device'] = 'Never'
+        relaxed_oem.clear_persistent_boot(self.task)
+        self.assertEqual(
+            'Never',
+            self.task.node.driver_info['force_persistent_boot_device'])
+
+    def test_a_failed_save_does_not_raise(self):
+        # It must never undo an insert that worked.
+        def boom():
+            raise RuntimeError('no database')
+
+        self.task.node.save = boom
+        self.assertFalse(relaxed_oem.request_persistent_boot(self.task))

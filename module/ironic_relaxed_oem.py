@@ -76,6 +76,22 @@ OPTS = [
                'has to be re-asserted before every deployment rather than '
                'once. Currently implements the Dell BootSources scheme. Has '
                'no effect on a BMC that does not expose it.')),
+    cfg.BoolOpt(
+        'force_persistent_boot_on_vmedia',
+        default=False,
+        help=_('Ask Ironic to make its boot device change PERSISTENT while '
+               'virtual media is attached, by setting the node driver_info '
+               'key force_persistent_boot_device to Always. Some BMCs accept '
+               'a one-time boot override, report it back, and then clear it '
+               'before the machine boots, so the machine boots its internal '
+               'disk and the agent never runs; the deployment then fails with '
+               'a timeout about a ramdisk that never started. MEASURED twice '
+               'on one iDRAC: a persistent override made the same machine '
+               'inspect immediately, and a one-time one never worked. This '
+               'uses Ironic OWN documented mechanism rather than overriding '
+               'it, so Ironic decides what to do with the request. The key is '
+               'removed again when the media is ejected, so a deployed machine '
+               'is left exactly as stock Ironic would leave it.')),
 ]
 
 # Registered on import. boot.py imports this module, and that happens while the
@@ -184,8 +200,71 @@ def insert(task, v_media, boot_url):
              'standard InsertMedia action.',
              {'slot': v_media.identity, 'node': task.node.uuid,
               'vendor': vendor})
+    request_persistent_boot(task)
     ensure_vmedia_first(task, v_media)
     return True
+
+
+def request_persistent_boot(task):
+    """Ask Ironic to make its boot device change persistent for this node.
+
+    WHY A driver_info KEY AND NOT A PATCH. Ironic already reads
+    `force_persistent_boot_device` in conductor/utils.py and honours 'Always',
+    so this asks through the documented mechanism instead of overriding the
+    decision. Ironic still chooses; this only supplies the input it looks for.
+
+    WHY IT IS NEEDED. Some BMCs accept a one-time boot override, report it
+    back, and clear it before the machine boots. The machine then boots its
+    internal disk, the agent never runs, and the deployment fails with a
+    timeout about a ramdisk that never started. MEASURED twice on one iDRAC: a
+    persistent override made the same machine inspect immediately.
+
+    Best effort. A node that cannot be saved is not a reason to undo an insert
+    that worked.
+    """
+    if not CONF.redfish.force_persistent_boot_on_vmedia:
+        return False
+    try:
+        if task.node.driver_info.get('force_persistent_boot_device') == 'Always':
+            return True
+        driver_info = dict(task.node.driver_info)
+        driver_info['force_persistent_boot_device'] = 'Always'
+        task.node.driver_info = driver_info
+        task.node.save()
+    except Exception as exc:
+        LOG.warning('Could not ask for a persistent boot device on node '
+                    '%(node)s, so the machine may boot its disk instead of '
+                    'the attached media: %(exc)s',
+                    {'node': task.node.uuid, 'exc': exc})
+        return False
+    LOG.info('Asked Ironic for a PERSISTENT boot device on node %(node)s, '
+             'because this BMC clears a one-time override before the machine '
+             'boots.', {'node': task.node.uuid})
+    return True
+
+
+def clear_persistent_boot(task):
+    """Take the request back when the media goes.
+
+    A DEPLOYED MACHINE MUST BE LEFT AS STOCK IRONIC WOULD LEAVE IT. Leaving the
+    key behind would make every later boot device change persistent too,
+    including the one that points a finished machine at its disk, which is a
+    behaviour change nobody asked for and nobody would look for.
+
+    Only removes what this code added, so a key set deliberately somewhere else
+    survives.
+    """
+    try:
+        if task.node.driver_info.get('force_persistent_boot_device') != 'Always':
+            return
+        driver_info = dict(task.node.driver_info)
+        del driver_info['force_persistent_boot_device']
+        task.node.driver_info = driver_info
+        task.node.save()
+    except Exception as exc:
+        LOG.warning('Could not withdraw the persistent boot request on node '
+                    '%(node)s: %(exc)s',
+                    {'node': task.node.uuid, 'exc': exc})
 
 
 def _managers_jobs_uri(conn):
@@ -338,4 +417,5 @@ def eject(task, v_media):
              '%(vendor)s OEM action.',
              {'slot': v_media.identity, 'node': task.node.uuid,
               'vendor': vendor})
+    clear_persistent_boot(task)
     return True
