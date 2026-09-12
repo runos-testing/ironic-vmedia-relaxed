@@ -19,6 +19,7 @@ Stdlib unittest only, so the image needs no test dependency installed.
 
 import json
 import os
+import json
 import types
 import unittest
 
@@ -126,6 +127,24 @@ MANAGERS = {'Members': [{'@odata.id': '/redfish/v1/Managers/iDRAC.Embedded.1'}]}
 def bad_request(msg='rejected'):
     return sushy_exc.BadRequestError('PATCH', '/x', types.SimpleNamespace(
         status_code=400, json=lambda: {}, content=b'', text=msg))
+
+
+def vendor_bad_request(message_id):
+    """A 400 shaped the way a BMC really sends one.
+
+    The bare-text fake above does NOT reproduce this: sushy builds its message
+    from the response JSON, so a vendor message id only reaches `str(exc)` when
+    the body carries it. A test that matched on the bare text would pass while
+    the real code path failed, which is exactly the shape of test that lets a
+    defect through.
+    """
+    body = {
+        'error': {'@Message.ExtendedInfo': [{'MessageID': message_id}]},
+        'Messages': [{'MessageID': message_id}],
+    }
+    return sushy_exc.BadRequestError('POST', '/x', types.SimpleNamespace(
+        status_code=400, json=lambda: body,
+        content=json.dumps(body).encode(), text=json.dumps(body)))
 
 
 class OptionDefaults(unittest.TestCase):
@@ -238,6 +257,41 @@ class OemInsertPayload(unittest.TestCase):
         CONF.set_override('enable_oem_vmedia_fallback', False, group='redfish')
         self.assertFalse(relaxed_oem.insert(self.task, self.vm, 'http://h/b.iso'))
         self.assertEqual([], self.conn.posts)
+
+    def test_already_attached_still_sets_the_boot_property(self):
+        """The regression that cost a whole evening.
+
+        MEASURED on iLO 4: a retry while media from the previous attempt is
+        still connected answers MaxVirtualMediaConnectionEstablished. Treating
+        that as a failure skipped the BootOnNextServerReset patch, so the media
+        was attached and the machine booted its DISK. Inspection then timed out
+        with "check if the ramdisk responsible for the inspection is running on
+        the node", which is accurate and tells nobody anything.
+
+        The insert is the part that can be skipped. The boot property is not: it
+        is one-shot and the previous attempt has already consumed it.
+        """
+        conn = FakeConn(post_exc=vendor_bad_request(
+            'iLO.0.10.MaxVirtualMediaConnectionEstablished'))
+        vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=conn)
+
+        self.assertTrue(relaxed_oem.insert(self.task, vm, 'http://h/b.iso'))
+        self.assertEqual(1, len(conn.patches))
+        _, body = conn.patches[0]
+        self.assertIs(True, body['Oem']['Hp']['BootOnNextServerReset'])
+
+    def test_a_real_bad_request_is_still_a_failure(self):
+        """Already-attached is ONE message, not every 400.
+
+        The status code is a plain 400 either way, which is also what a
+        genuinely malformed request gives. Widening this to any 400 would hide
+        the failures the fallback exists to report.
+        """
+        conn = FakeConn(post_exc=vendor_bad_request(
+            'Base.0.10.ActionParameterUnknown'))
+        vm = fake_vmedia(load('ilo4_virtualmedia.json'), conn=conn)
+        self.assertFalse(relaxed_oem.insert(self.task, vm, 'http://h/b.iso'))
+        self.assertEqual([], conn.patches)
 
 
 class InsertHookReachedFromBothPaths(unittest.TestCase):

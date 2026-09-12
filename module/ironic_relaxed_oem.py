@@ -108,6 +108,16 @@ def _oem_action(v_media, verb):
     return None, None
 
 
+def _already_attached(exc):
+    """Whether a failed insert failed because media is already connected.
+
+    Matched on the message rather than a status code: the code is a plain 400,
+    which is also what a genuinely bad request gives, and the two must not be
+    confused. The vendor message id is the only thing that separates them.
+    """
+    return 'MaxVirtualMediaConnectionEstablished' in str(exc)
+
+
 def insert(task, v_media, boot_url):
     """Insert virtual media using a vendor OEM action.
 
@@ -129,10 +139,28 @@ def insert(task, v_media, boot_url):
     try:
         v_media._conn.post(target, data={'Image': boot_url})
     except sushy.exceptions.SushyError as exc:
-        LOG.warning('OEM virtual media insert via %(vendor)s failed for node '
-                    '%(node)s: %(exc)s',
-                    {'vendor': vendor, 'node': task.node.uuid, 'exc': exc})
-        return False
+        # ALREADY ATTACHED IS NOT A FAILURE, and treating it as one cost a whole
+        # evening of a machine that would not boot its own agent.
+        #
+        # MEASURED on iLO 4: a retry while media from the previous attempt is
+        # still connected answers
+        #   iLO.0.10.MaxVirtualMediaConnectionEstablished
+        # Returning False there skipped the BootOnNextServerReset patch below,
+        # so the media was attached and the machine booted its disk instead.
+        # Inspection then timed out with "check if the ramdisk responsible for
+        # the inspection is running on the node", which is true and unhelpful.
+        #
+        # The insert is what can be skipped; the boot property is what must not
+        # be, because it is one-shot and a previous attempt has consumed it.
+        if not _already_attached(exc):
+            LOG.warning('OEM virtual media insert via %(vendor)s failed for '
+                        'node %(node)s: %(exc)s',
+                        {'vendor': vendor, 'node': task.node.uuid, 'exc': exc})
+            return False
+        LOG.info('Media was already attached on node %(node)s, so the insert '
+                 'was skipped. Still setting the boot property, which is '
+                 'one-shot and has been consumed by the previous attempt.',
+                 {'node': task.node.uuid})
 
     # BootOnNextServerReset is the iLO equivalent of a one-time boot override,
     # and it is a PROPERTY set by a separate PATCH, not a parameter of the
