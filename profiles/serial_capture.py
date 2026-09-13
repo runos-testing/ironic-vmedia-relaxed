@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import threading
 import time
 from urllib.parse import urlsplit
@@ -126,7 +127,10 @@ class SerialCapture:
     def close(self):
         self.stop.set()
         if self.client:
-            self.client.close(force=True)
+            try:
+                os.kill(self.client.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         self.thread.join(timeout=45)
         if self.thread.is_alive():
             raise RuntimeError('The previous serial connection is still closing.')
