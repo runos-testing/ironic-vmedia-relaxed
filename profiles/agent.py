@@ -26,6 +26,7 @@ def export_clients(document):
 def main():
     TARGET.parent.mkdir(parents=True, exist_ok=True)
     Path('/shared/html/redfish').mkdir(parents=True, exist_ok=True)
+    os.chown('/shared/html/redfish', 997, 997)
     subprocess.Popen(['rpcbind', '-f'])
     server = None
     previous = None
