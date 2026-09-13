@@ -31,6 +31,7 @@ from oslo_log import log
 import sushy
 
 from ironic.common.i18n import _
+from ironic.drivers.modules.redfish import runos_profiles
 from ironic.conf import CONF
 
 LOG = log.getLogger(__name__)
@@ -292,7 +293,7 @@ def ensure_vmedia_first(task, v_media):
     pinned first permanently makes the machine stop on an empty optical device
     on every later boot.
     """
-    if not CONF.redfish.enable_oem_boot_order:
+    if not runos_profiles.boot_order_enabled(task.node, CONF.redfish.enable_oem_boot_order):
         return False
     return _reorder_boot(task, v_media, optical_first=True)
 
@@ -388,7 +389,7 @@ def restore_disk_first(task, v_media):
 
     So the top position is held only for as long as the media is attached.
     """
-    if not CONF.redfish.enable_oem_boot_order:
+    if not runos_profiles.boot_order_enabled(task.node, CONF.redfish.enable_oem_boot_order):
         return False
     return _reorder_boot(task, v_media, optical_first=False)
 

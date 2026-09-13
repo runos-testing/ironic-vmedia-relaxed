@@ -498,3 +498,17 @@ image and re-test on Ironic upgrades.
 
 Apache 2.0, matching Ironic. The patch modifies Ironic source; see
 [openstack/ironic](https://opendev.org/openstack/ironic).
+
+## Provider machine profiles
+
+The driver reads `/shared/runos/profiles.json` before preparing virtual media.
+The version 1 document maps exact management endpoints and system paths to settings.
+An unassigned machine retains the existing driver behavior.
+`mediaBaseUrl` selects the HTTP or NFS media base URL for that machine.
+`oemBootOrder` overrides the stack boot-order option for that machine only.
+Keep the override false unless hardware measurements require boot reordering.
+
+The companion profile service copies the mounted ConfigMap into the shared volume.
+The service exports inspection media read-only to BMCs assigned NFS profiles.
+The provider retains the source profile in RunOS.
+Firmware prerequisites belong in provider notes until a firmware action applies and verifies those settings.

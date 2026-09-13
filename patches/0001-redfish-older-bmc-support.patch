@@ -8,6 +8,14 @@
  from ironic.drivers import utils as driver_utils
  
  LOG = log.getLogger(__name__)
+@@ -107,6 +108,7 @@
+     :raises: InvalidParameterValue, if any of the parameters have invalid
+         value.
+     """
++    relaxed_oem.runos_profiles.apply_profile(node)
+     mode = deploy_utils.rescue_or_deploy_mode(node)
+     if not deploy_utils.needs_agent_ramdisk(node, mode=mode):
+         # Ramdisk deploy does not need an agent, nor does it support any other
 @@ -424,6 +425,8 @@
          # via WebSocket/NBD and do not have the InsertMedia action.
          # Catch MissingActionError and try the next available device.

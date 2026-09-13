@@ -41,6 +41,9 @@ ARG SITE_PACKAGES=/usr/lib/python3.12/site-packages
 COPY module/ironic_relaxed_oem.py \
      ${SITE_PACKAGES}/ironic/drivers/modules/redfish/relaxed_oem.py
 
+COPY module/runos_profiles.py \
+     ${SITE_PACKAGES}/ironic/drivers/modules/redfish/runos_profiles.py
+
 # Only the call sites.
 COPY --from=patcher ${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py \
                     ${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py
