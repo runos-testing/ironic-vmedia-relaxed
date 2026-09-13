@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import time
 from serial_broker import start_broker
@@ -24,12 +25,21 @@ def export_clients(document):
     return sorted(clients)
 
 
+def ensure_rpcbind():
+    # A second daemon captures local registrations while the host serves port 111.
+    try:
+        with socket.create_connection(('127.0.0.1', 111), timeout=2):
+            return
+    except OSError:
+        subprocess.Popen(['rpcbind', '-f'])
+
+
 def main():
     TARGET.parent.mkdir(parents=True, exist_ok=True)
     serial_pool = start_broker()
     Path('/shared/html/redfish').mkdir(parents=True, exist_ok=True)
     os.chown('/shared/html/redfish', 997, 997)
-    subprocess.Popen(['rpcbind', '-f'])
+    ensure_rpcbind()
     server = None
     previous = None
     while True:
