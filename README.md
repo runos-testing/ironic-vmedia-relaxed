@@ -121,7 +121,12 @@ that deploys perfectly and then never boots again. See the prerequisite below.
 Currently implements the Dell `BootSources` scheme, and does nothing on a BMC
 that does not expose it.
 
-#### Prerequisite: the virtual device must be permanently attached
+#### Prerequisite FOR THIS OPTION: the virtual device must be permanently attached
+
+Read this as a prerequisite for the run-time reorder and nothing else. The static
+configuration described after it wants the OPPOSITE setting, and the two are not
+in conflict: a reorder has to name an entry that exists at the moment it runs,
+while the static setup relies on the entry appearing and disappearing on its own.
 
 This option cannot help if the BMC never presents the virtual device to the
 host, because then it is not a boot option to reorder. On Dell, check:
@@ -174,6 +179,12 @@ With no media attached the device is not presented at all, so it vanishes from
 the boot order and the disk boots. With media attached it reappears at the top
 and the machine boots the media. Nothing has to be reordered at run time.
 
+Writing that order needs the entry to exist for as long as it takes to write it,
+which is the one thing the two configurations share. Attach media, or set
+`Attached` long enough to pin the order, then put the BMC back to `AutoAttach`.
+After that the entry comes and goes by itself and the order never needs touching
+again.
+
 Configured that way, with this option OFF, a full deploy ran clean:
 inspection completed, the image was written, the node reached `active`, and the
 machine booted its new image 45 seconds later.
@@ -183,6 +194,14 @@ back on top at the end of every deploy, so the NEXT deploy powers on with the
 disk first, boots the old image instead of the agent, and the node sits in
 `wait call-back` until it times out. That is a worse failure than the one the
 option solves, because the machine looks healthy while the record of it is wrong.
+
+**Turning the option off does not put the boot order back.** MEASURED, and it cost
+an hour: the restore half had already moved the disk to the top, and disabling the
+option simply stops anything moving it again. The machine is left booting its disk
+first, every Redfish boot override on it is then irrelevant, and the symptom is
+identical to the one the option exists to fix. After ever having enabled it, read
+the order back and re-pin the optical device before concluding anything about
+virtual media.
 
 There is also a reason to distrust the mechanism itself: on the same machine,
 seconds apart, the Redfish `BootSources` view and the vendor CLI DISAGREED about
