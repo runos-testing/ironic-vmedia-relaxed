@@ -512,3 +512,17 @@ The companion profile service copies the mounted ConfigMap into the shared volum
 The service exports inspection media read-only to BMCs assigned NFS profiles.
 The provider retains the source profile in RunOS.
 Firmware prerequisites belong in provider notes until a firmware action applies and verifies those settings.
+
+The optional serial broker shares one read-only SSH connection per machine.
+The provider selects `serialConsole`: `disabled`, `idrac-ssh`, or `ilo-ssh`.
+The broker resolves each machine through the local Ironic API.
+The broker reads its BMC secret through a separate Kubernetes identity.
+That identity can read only secrets for machines with enabled serial adapters.
+The identity token is mounted only in the broker at `/serial-auth`.
+The API credentials are mounted at `/ironic-auth` and never returned to readers.
+OpenSSH retains first-use host keys in the shared site volume.
+Each authenticated read renews a 45-second lease.
+Allocation changes clear the previous buffer before another tenant can read output.
+Disabling the provider adapter closes the capture.
+The buffer retains the last 65536 characters and is not a durable archive.
+The broker accepts requests through a private Unix socket, with no public listener.

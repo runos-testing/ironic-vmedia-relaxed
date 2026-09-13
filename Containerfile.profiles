@@ -1,6 +1,6 @@
 FROM python:3.12-alpine3.22
-RUN apk add --no-cache unfs3 rpcbind
-COPY profiles/agent.py /app/agent.py
+RUN apk add --no-cache unfs3 rpcbind openssh-client
+RUN pip install --no-cache-dir pexpect==4.9.0
+COPY profiles/*.py /app/
 ENTRYPOINT ["python3", "/app/agent.py"]
-COPY profiles/test_agent.py /app/test_agent.py
-RUN cd /app && python3 -m unittest test_agent -v && rm test_agent.py
+RUN cd /app && python3 -m unittest discover -p 'test_*.py' -v && rm test_*.py

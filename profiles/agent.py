@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from serial_broker import start_broker
 
 SOURCE = Path('/profiles/profiles.json')
 TARGET = Path('/shared/runos/profiles.json')
@@ -25,6 +26,7 @@ def export_clients(document):
 
 def main():
     TARGET.parent.mkdir(parents=True, exist_ok=True)
+    serial_pool = start_broker()
     Path('/shared/html/redfish').mkdir(parents=True, exist_ok=True)
     os.chown('/shared/html/redfish', 997, 997)
     subprocess.Popen(['rpcbind', '-f'])
@@ -32,6 +34,7 @@ def main():
     previous = None
     while True:
         try:
+            serial_pool.reap()
             raw = SOURCE.read_text() if SOURCE.exists() else '{"version":1,"machines":{}}'
             document = json.loads(raw)
             clients = export_clients(document)
