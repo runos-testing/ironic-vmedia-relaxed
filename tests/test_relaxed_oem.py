@@ -611,3 +611,22 @@ class PersistentBootRequest(unittest.TestCase):
 
         self.task.node.save = boom
         self.assertFalse(relaxed_oem.request_persistent_boot(self.task))
+
+    def test_the_standard_insert_path_asks_too(self):
+        """The machine that NEEDS this never reaches the OEM fallback.
+
+        relaxed_oem.insert() runs only when the standard InsertMedia action is
+        missing or refused. The iDRAC that clears the one-time override
+        implements the standard action, so it takes the success path and the
+        request has to be made there as well.
+        """
+        import inspect
+        self.assertIn('relaxed_oem.request_persistent_boot',
+                      inspect.getsource(rb._insert_vmedia_in_resource))
+
+    def test_the_standard_eject_path_withdraws_too(self):
+        # Symmetric with the insert. A request made on both paths must be
+        # withdrawn on both, or a deployed machine keeps the key.
+        import inspect
+        self.assertIn('relaxed_oem.clear_persistent_boot',
+                      inspect.getsource(rb._eject_vmedia_from_resource))

@@ -28,17 +28,22 @@
              err_msg = ("Inserting virtual media into %(boot_device)s "
                         "failed for node %(node)s, moving to next virtual "
                         "media device, if available. %(exc)s" %
-@@ -472,6 +479,9 @@
+@@ -472,6 +479,14 @@
                  continue
              raise
  
 +        # The standard insert worked, but some BMCs ignore the boot override,
 +        # so the media may still not be what boots.
++        #
++        # BOTH hooks belong here and not only in the OEM fallback. A BMC that
++        # implements the standard action can still clear a one-time override
++        # before the machine boots, and that machine never reaches the fallback.
++        relaxed_oem.request_persistent_boot(task)
 +        relaxed_oem.ensure_vmedia_first(task, v_media)
          LOG.info("Inserted boot media %(boot_url)s into "
                   "%(boot_device)s for node "
                   "%(node)s", {'node': task.node.uuid,
-@@ -564,7 +574,16 @@
+@@ -564,7 +579,19 @@
                  continue
          inserted = v_media.inserted
          if inserted:
@@ -53,10 +58,13 @@
 +            # was attached. Give it back, or the machine is offered an empty
 +            # optical device first on every later boot and some stop there.
 +            relaxed_oem.restore_disk_first(task, v_media)
++            # Symmetric with the request made at insert time, and on BOTH
++            # paths for the same reason: the request is made on both.
++            relaxed_oem.clear_persistent_boot(task)
              found = True
  
          LOG.info("Boot media is%(already)s ejected from "
-@@ -912,6 +931,12 @@
+@@ -912,6 +939,12 @@
              with node.
          :raises: InvalidParameterValue if vendor not supported
          """

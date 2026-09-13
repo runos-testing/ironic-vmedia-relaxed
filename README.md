@@ -25,8 +25,8 @@ the window and nonetheless work.
 
 ## What this changes
 
-Two config options, both `false` by default. While both are false this image
-behaves exactly like the stock one.
+Four config options, all `false` by default. While they are all false this
+image behaves exactly like the stock one.
 
 ### `[redfish]skip_vendor_validation`
 
@@ -53,6 +53,36 @@ to honour the standard `Boot` override either.
 
 **This fallback is reached only when the standard action is missing**, so it
 cannot change behaviour on a BMC that implements it.
+
+### `[redfish]force_persistent_boot_on_vmedia`
+
+For a BMC that accepts the one-time boot override, reports it back, and then
+clears it before the machine boots. The machine boots its internal disk, the
+agent never runs, and the failure is a timeout saying the inspection ramdisk is
+not running, which is true and tells nobody why.
+
+With this option on, the code writes `force_persistent_boot_device = Always`
+into the node's `driver_info` while media is attached, and removes it again on
+eject. Ironic already reads that key in `conductor/utils.py` and honours exactly
+`Always`, so this asks through the documented mechanism rather than overriding
+the decision. Ironic still chooses; the option only supplies the input it looks
+for.
+
+Two things about it are load-bearing:
+
+- **It is requested wherever the insert succeeds, not only in the OEM
+  fallback.** A BMC that implements the standard `InsertMedia` action never
+  reaches the fallback, and one such BMC is exactly the hardware that needs
+  this. MEASURED on an iDRAC 7: with the request made only on the fallback path
+  the override read back `Once/Cd` and then `Once/None`, never `Continuous`.
+- **The key is withdrawn on eject, on both paths.** Left behind it would make
+  every later boot device change persistent too, including the one that points a
+  finished machine at its disk. That is a behaviour change nobody asked for and
+  nobody would think to look for.
+
+Failing to write the key is a warning, never a failure: the media is attached by
+then, and a node that cannot be saved is not a reason to undo an insert that
+worked.
 
 ### `[redfish]enable_oem_boot_order`
 
@@ -408,13 +438,18 @@ Pin to a `sha-<commit>` tag in anything you care about. Then enable the option:
 skip_vendor_validation = true
 # For a BMC that has NO standard InsertMedia action at all, e.g. HPE iLO 4
 enable_oem_vmedia_fallback = true
-# For a BMC that accepts the boot override and then ignores it
-enable_oem_boot_order = true
+# For a BMC that accepts the one-time boot override and then clears it
+force_persistent_boot_on_vmedia = true
+# LAST RESORT for the same symptom, and MEASURED HARMFUL where the two BMC
+# settings above it in the boot-order section are available. Read that section
+# before turning this on.
+# enable_oem_boot_order = true
 ```
 
 Enable only what the hardware in front of you actually needs. They are
 independent: the first is for a BMC that can do standard virtual media and is
-being refused, the second is for one that genuinely cannot.
+being refused, the second is for one that genuinely cannot, and the third is for
+one that attaches media fine but will not boot it.
 
 Under Metal3, set it through the `Ironic` custom resource:
 
