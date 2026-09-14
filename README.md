@@ -552,3 +552,10 @@ Allocation changes clear the previous buffer before another tenant can read outp
 Disabling the provider adapter closes the capture.
 The buffer retains the last 65536 characters and is not a durable archive.
 The broker accepts requests through a private Unix socket, with no public listener.
+
+## Signed image downloads
+
+The HTTP image service validates S3 signed GET URLs with a streamed GET.
+The service reads the headers and closes the stream before consuming the image.
+Unsigned URLs retain HEAD validation. Download checksum verification remains active.
+The container tests exercise validation and download against an HTTP server that refuses signed HEAD requests.

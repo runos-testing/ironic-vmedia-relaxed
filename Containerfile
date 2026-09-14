@@ -30,7 +30,9 @@ COPY patches/ /tmp/patches/
 # build.
 RUN microdnf install -y patch \
  && patch -p1 --forward --batch -d "${SITE_PACKAGES}" \
-        < /tmp/patches/0001-redfish-older-bmc-support.patch
+        < /tmp/patches/0001-redfish-older-bmc-support.patch \
+ && patch -p1 --forward --batch -d "${SITE_PACKAGES}" \
+        < /tmp/patches/0002-signed-image-validation.patch
 
 # ---- final: stock image, our module, and the patched call sites -------------
 FROM ${IRONIC_IMAGE}
@@ -50,6 +52,9 @@ COPY module/idrac_boot.py \
 # Only the call sites.
 COPY --from=patcher ${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py \
                     ${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py
+
+COPY --from=patcher ${SITE_PACKAGES}/ironic/common/image_service.py \
+                    ${SITE_PACKAGES}/ironic/common/image_service.py
 
 # Drop the stale bytecode the base image built from the unpatched source, then
 # rebuild it, so the running service cannot load a cached unpatched module.

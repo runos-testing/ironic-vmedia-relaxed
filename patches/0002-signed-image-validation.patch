@@ -1,0 +1,28 @@
+--- a/ironic/common/image_service.py
++++ b/ironic/common/image_service.py
+@@ -204,10 +204,21 @@
+             auth = HttpImageService.gen_auth_from_conf_user_pass(image_href)
+             # NOTE(TheJulia): Head requests do not work on things that are not
+             # files, but they can be responded with redirects or a 200 OK....
+-            response = self.session.head(
+-                image_href, verify=verify,
+-                timeout=CONF.webserver_verify_timeout,
+-                auth=auth, allow_redirects=True)
++            query = urlparse.parse_qs(urlparse.urlsplit(image_href).query)
++            signed_get = any(k.lower() == 'x-amz-signature' for k in query)
++            if signed_get:
++                # S3 signatures bind the HTTP method. Read headers, then close
++                # the GET stream without consuming the multi-gigabyte body.
++                response = self.session.get(
++                    image_href, stream=True, verify=verify,
++                    timeout=CONF.webserver_verify_timeout,
++                    auth=auth, allow_redirects=True)
++                response.close()
++            else:
++                response = self.session.head(
++                    image_href, verify=verify,
++                    timeout=CONF.webserver_verify_timeout,
++                    auth=auth, allow_redirects=True)
+ 
+             if (response.status_code == http_client.FORBIDDEN
+                     and str(image_href).endswith('/')):
