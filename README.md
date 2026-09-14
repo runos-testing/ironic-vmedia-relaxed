@@ -25,8 +25,28 @@ the window and nonetheless work.
 
 ## What this changes
 
-Four config options, all `false` by default. While they are all false this
+Five config options, all `false` by default. While they are all false this
 image behaves exactly like the stock one.
+
+### `[redfish]enable_idrac_one_time_boot`
+
+Some iDRAC firmware accepts the standard boot override but boots another device.
+This option arms `iDRAC.serverboot.FirstBootDevice=VCD-DVD` and `BootOnce=Enabled` through SSH.
+The hook runs after media insertion and the standard boot override, before power-on.
+The driver verifies both values before returning.
+An authentication failure or mismatched readback fails preparation with a diagnostic.
+The deployment boot consumes the setting, so the installed image can then boot from disk.
+
+Prefer the provider profile field `idracOneTimeBoot` to enable the mechanism for one machine.
+The field defaults to false and does not change another machine's boot behavior.
+The driver uses the existing Redfish credentials for SSH.
+SSH retains first-use host keys in `/shared/ironic-ssh/known_hosts` and refuses changed keys.
+The opt-in adapter requires the legacy SSH algorithms supported by the measured firmware.
+Some controllers require password authentication followed by keyboard-interactive authentication on the same connection.
+
+This option does not reset firmware, change boot mode, or clear UEFI variables.
+Confirm active UEFI mode before deployment.
+Test consecutive reinstalls because a completed installation can change the next boot's behavior.
 
 ### `[redfish]skip_vendor_validation`
 
@@ -167,7 +187,12 @@ failed install and is not one.
 So the two halves have to ship together. If you implement this scheme for
 another vendor, restore the order on eject as well.
 
-#### Prefer the static configuration to this option
+#### Historical static configuration
+
+Later consecutive-install tests invalidate the claim that this setup needs no further changes.
+The firmware can change the boot order after installation or recreate the optical entry elsewhere.
+Use the immediate one-time selector on hardware where that behavior is measured.
+The following observations describe an earlier successful run, not a guarantee of unattended reuse.
 
 MEASURED, and the reason this section exists: on the hardware this was built
 for, two BMC settings do the whole job and this option is not needed.
@@ -409,9 +434,9 @@ running whatever was already installed on it.
 
 Two settings can be responsible, and they are not the same one:
 
-- A first-boot-device setting (on Dell, `iDRAC.serverboot.FirstBootDevice`)
-  applies to **legacy BIOS** boot. Setting it on a UEFI machine changes nothing,
-  and it reports success while doing so.
+- The iDRAC immediate selector (`iDRAC.serverboot.FirstBootDevice`) differs from
+  the standard Redfish override. Later tests verify `VCD-DVD` with `BootOnce=Enabled`
+  on UEFI hardware when armed after media insertion.
 - In UEFI mode the machine obeys its **UEFI boot sequence**
   (`BIOS.BiosBootSettings.UefiBootSeq` on Dell). After an OS is installed, the
   internal disk sits at the top of that list and the virtual optical device at
@@ -506,6 +531,7 @@ The version 1 document maps exact management endpoints and system paths to setti
 An unassigned machine retains the existing driver behavior.
 `mediaBaseUrl` selects the HTTP or NFS media base URL for that machine.
 `oemBootOrder` overrides the stack boot-order option for that machine only.
+`idracOneTimeBoot` overrides the immediate iDRAC boot option for that machine only.
 Keep the override false unless hardware measurements require boot reordering.
 
 The companion profile service copies the mounted ConfigMap into the shared volume.

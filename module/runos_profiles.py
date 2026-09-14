@@ -52,3 +52,13 @@ def boot_order_enabled(node, default):
     if not isinstance(value, bool):
         raise ValueError('RunOS OEM boot order setting must be boolean')
     return value
+
+
+def idrac_boot_enabled(node, default):
+    profile = load_profile(node.driver_info)
+    if profile is None or 'idracOneTimeBoot' not in profile:
+        return default
+    value = profile['idracOneTimeBoot']
+    if not isinstance(value, bool):
+        raise ValueError('RunOS iDRAC one-time boot setting must be boolean')
+    return value

@@ -31,12 +31,19 @@ from oslo_log import log
 import sushy
 
 from ironic.common.i18n import _
+from ironic.common import exception
+from ironic.drivers.modules.redfish import idrac_boot
 from ironic.drivers.modules.redfish import runos_profiles
 from ironic.conf import CONF
 
 LOG = log.getLogger(__name__)
 
 OPTS = [
+    cfg.BoolOpt(
+        'enable_idrac_one_time_boot', default=False,
+        help=_('Set the iDRAC immediate virtual CD boot selector through SSH '
+               'after the standard boot override. Use only on verified hardware. '
+               'A provider machine profile can override this setting.')),
     cfg.BoolOpt(
         'skip_vendor_validation',
         default=False,
@@ -106,6 +113,18 @@ _OEM_VENDORS = ('Hp', 'Hpe')
 def skip_vendor_validation():
     """Whether the vendor and firmware gate should be bypassed."""
     return CONF.redfish.skip_vendor_validation
+
+
+def arm_idrac_boot(task):
+    if not runos_profiles.idrac_boot_enabled(task.node, CONF.redfish.enable_idrac_one_time_boot):
+        return
+    try:
+        idrac_boot.set_one_time_boot(task.node.driver_info)
+    except Exception as exc:
+        # SSH errors may contain credentials or management addresses.
+        detail = str(exc) if isinstance(exc, idrac_boot.BootSelectionError) else type(exc).__name__
+        raise exception.RedfishError(error='iDRAC one-time boot failed: ' + detail) from None
+    LOG.info('Verified immediate iDRAC virtual CD boot for node %s', task.node.uuid)
 
 
 def _oem_action(v_media, verb):

@@ -44,6 +44,9 @@ COPY module/ironic_relaxed_oem.py \
 COPY module/runos_profiles.py \
      ${SITE_PACKAGES}/ironic/drivers/modules/redfish/runos_profiles.py
 
+COPY module/idrac_boot.py \
+     ${SITE_PACKAGES}/ironic/drivers/modules/redfish/idrac_boot.py
+
 # Only the call sites.
 COPY --from=patcher ${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py \
                     ${SITE_PACKAGES}/ironic/drivers/modules/redfish/boot.py

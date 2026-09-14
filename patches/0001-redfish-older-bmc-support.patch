@@ -85,3 +85,11 @@
          vendor = task.node.properties.get('vendor')
          if not vendor:
              return
+@@ -1093,6 +1126,7 @@
+         boot_mode_utils.sync_boot_mode(task)
+ 
+         self._set_boot_device(task, boot_devices.CDROM)
++        relaxed_oem.arm_idrac_boot(task)
+ 
+         LOG.debug("Node %(node)s is set to one time boot from "
+                   "%(device)s", {'node': task.node.uuid,
